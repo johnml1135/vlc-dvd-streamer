@@ -17,6 +17,7 @@ export class ServerLog {
   constructor(
     private readonly eventHub?: EventHub,
     private readonly maxEntries = 200,
+    private readonly sink?: (line: string, entry: ServerLogEntry) => void,
   ) {}
 
   list(): ServerLogEntry[] {
@@ -55,6 +56,12 @@ export class ServerLog {
       payload: entry,
     })
 
+    this.sink?.(formatLogEntry(entry), entry)
+
     return entry
   }
+}
+
+function formatLogEntry(entry: ServerLogEntry): string {
+  return `[${entry.at}] [${entry.level.toUpperCase()}] [${entry.scope}] ${entry.message}`
 }

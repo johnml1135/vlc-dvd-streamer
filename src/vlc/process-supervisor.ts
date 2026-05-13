@@ -46,10 +46,12 @@ export function spawnManagedProcess(spec: CommandSpec): ManagedProcessHandle {
   let settled = false
   let hardKillTimer: NodeJS.Timeout | undefined
 
-  const timeout = setTimeout(() => {
-    timedOut = true
-    void stop()
-  }, spec.timeoutMs)
+  const timeout = spec.timeoutMs > 0
+    ? setTimeout(() => {
+      timedOut = true
+      void stop()
+    }, spec.timeoutMs)
+    : undefined
 
   child.stdout?.on('data', (chunk) => {
     stdout += chunk.toString()
@@ -66,7 +68,9 @@ export function spawnManagedProcess(spec: CommandSpec): ManagedProcessHandle {
       }
 
       settled = true
-      clearTimeout(timeout)
+      if (timeout) {
+        clearTimeout(timeout)
+      }
       if (hardKillTimer) {
         clearTimeout(hardKillTimer)
       }
@@ -80,7 +84,9 @@ export function spawnManagedProcess(spec: CommandSpec): ManagedProcessHandle {
       }
 
       settled = true
-      clearTimeout(timeout)
+      if (timeout) {
+        clearTimeout(timeout)
+      }
       if (hardKillTimer) {
         clearTimeout(hardKillTimer)
       }

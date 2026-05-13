@@ -93,9 +93,7 @@ export class CatalogService {
         durationSeconds: title.durationSeconds,
         likelyMainFeature: title.durationSeconds === longestDuration,
         thumbnailUrl: `/api/discs/current/titles/${title.titleNumber}/thumbnail.jpg`,
-        audioTracks: title.audioTracks.length > 0
-          ? title.audioTracks
-          : [{ id: 1, label: 'Audio 1' }],
+        audioTracks: title.audioTracks,
         subtitleTracks: title.subtitleTracks,
       }))
 

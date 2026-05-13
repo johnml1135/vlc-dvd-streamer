@@ -114,7 +114,10 @@ export class VlcWorker {
           audioTracks: parsed.audioTracks,
           subtitleTracks: parsed.subtitleTracks,
         })
-        this.options.logger?.info('catalog', `Title ${titleNumber} metadata ready (${parsed.durationSeconds}s).`)
+        this.options.logger?.info(
+          'catalog',
+          `Found title ${titleNumber}: ${parsed.durationSeconds}s, ${parsed.audioTracks.length} audio track(s), ${parsed.subtitleTracks.length} subtitle track(s).`,
+        )
       } catch {
         // Skip titles that do not yield stable timing metadata.
         this.options.logger?.warn('catalog', `Skipping title ${titleNumber} because VLC did not produce stable duration metadata.`)
@@ -182,7 +185,7 @@ export class VlcWorker {
         `--drive=${input.drive}`,
         `--titleNumber=${input.titleNumber}`,
         `--outDir=${input.outputDir}`,
-      ])
+      ], 0)
       : createCommandSpec({
         executable: this.options.executable,
         args: buildHlsArgs({
@@ -193,9 +196,11 @@ export class VlcWorker {
           outputDir: input.outputDir,
           baseUrl: input.baseUrl,
         }),
-        timeoutMs: this.options.timeoutMs,
+        timeoutMs: 0,
         label: 'vlc-hls',
       })
+
+    this.options.logger?.info('session', `HLS session for title ${input.titleNumber} will stay alive until playback stops or a replacement session starts.`)
 
     return {
       handle: spawnManagedProcess(command),
@@ -203,11 +208,11 @@ export class VlcWorker {
     }
   }
 
-  private buildShimCommand(label: string, args: string[]) {
+  private buildShimCommand(label: string, args: string[], timeoutMs = this.options.timeoutMs) {
     return createCommandSpec({
       executable: this.options.executable,
       args: ['--import', 'tsx', this.options.shimScript!, ...args],
-      timeoutMs: this.options.timeoutMs,
+      timeoutMs,
       label,
       env: this.options.shimEnv
         ? { ...process.env, ...this.options.shimEnv }
@@ -224,6 +229,8 @@ export class VlcWorker {
       'dummy',
       '--aout',
       'dummy',
+      '--audio-language=en',
+      '--sub-language=en',
       '--play-and-exit',
       '--run-time',
       '1',

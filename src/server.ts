@@ -12,9 +12,29 @@ const config = loadConfig(process.env)
 await mkdir(config.cacheDir, { recursive: true })
 
 const eventHub = new EventHub()
-const serverLog = new ServerLog(eventHub)
+const serverLog = new ServerLog(eventHub, 200, (line, entry) => {
+  if (entry.level === 'error') {
+    console.error(line)
+    return
+  }
+
+  if (entry.level === 'warn') {
+    console.warn(line)
+    return
+  }
+
+  console.log(line)
+})
+
+serverLog.info('server', `Bootstrapping DVD Streamer with host=${config.host}, port=${config.port}, drive=${config.drive ?? 'D:'}, cacheDir=${config.cacheDir}.`)
 
 const resolvedVlc = await findVlc(config.vlcCandidates)
+serverLog.info(
+  'server',
+  resolvedVlc.found
+    ? `Resolved VLC executable: ${resolvedVlc.path}`
+    : `VLC executable was not found. Tried: ${config.vlcCandidates.join(', ')}`,
+)
 const worker = new VlcWorker({
   executable: resolvedVlc.path ?? config.vlcCandidates[0] ?? process.execPath,
   drive: config.drive ?? 'D:',
@@ -58,3 +78,4 @@ app.addHook('onClose', async () => {
 })
 
 await app.listen({ host: config.host, port: config.port })
+serverLog.info('server', `HTTP server listening on ${config.host}:${config.port}.`)

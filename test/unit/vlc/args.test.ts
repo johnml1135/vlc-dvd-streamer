@@ -41,11 +41,11 @@ describe('buildThumbnailArgs', () => {
 })
 
 describe('buildHlsArgs', () => {
-  it('includes livehttp output and selected audio/subtitle options', () => {
+  it('includes livehttp output and selected zero-based audio/subtitle options', () => {
     const args = buildHlsArgs({
       drive: 'D:',
       titleNumber: 4,
-      audioTrack: 1,
+      audioTrack: 0,
       subtitleTrack: 2,
       outputDir: 'C:/cache/sessions/session-1',
       baseUrl: '/streams/session-1/',
@@ -53,11 +53,25 @@ describe('buildHlsArgs', () => {
 
     expect(args).toContain('--intf')
     expect(args).toContain('dummy')
-    expect(args).toContain('--audio-track=1')
+    expect(args).toContain('--audio-track=0')
     expect(args).toContain('--sub-track=2')
     expect(args).toContain('dvd:///D:/#4')
     expect(args.some((arg) => arg.includes('livehttp'))).toBe(true)
+    expect(args.some((arg) => arg.includes('soverlay'))).toBe(true)
+    expect(args.some((arg) => arg.includes('scodec=dvbs'))).toBe(false)
     expect(args.some((arg) => arg.includes('index.m3u8'))).toBe(true)
     expect(args.some((arg) => arg.includes('segment-######.ts'))).toBe(true)
+  })
+
+  it('prefers English audio automatically when no explicit audio track is selected', () => {
+    const args = buildHlsArgs({
+      drive: 'D:',
+      titleNumber: 4,
+      outputDir: 'C:/cache/sessions/session-1',
+      baseUrl: '/streams/session-1/',
+    })
+
+    expect(args).toContain('--audio-language=en')
+    expect(args.some((arg) => arg.startsWith('--audio-track='))).toBe(false)
   })
 })

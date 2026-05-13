@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { renderPlayerPage } from '../../src/ui/page.js'
+import { renderHomePage, renderPlayerPage } from '../../src/ui/page.js'
 
 describe('renderPlayerPage', () => {
   it('renders a browser-safe player script and supports a video-only manifest override', () => {
@@ -30,5 +30,49 @@ describe('renderPlayerPage', () => {
     expect(html).toContain("event.type === 'server.log'")
     expect(html).toContain("event.type === 'catalog.updated'")
     expect(html).toContain('window.location.reload()')
+    expect(html).toContain("lines.join('\\n')")
+    expect(html).toContain("split('\\n')")
+  })
+})
+
+describe('renderHomePage', () => {
+  it('defaults the audio form to automatic English preference instead of forcing the first numeric track', () => {
+    const html = renderHomePage({
+      health: {
+        ok: true,
+        dependencies: {
+          vlc: {
+            found: true,
+            path: 'C:/Program Files/VideoLAN/VLC/vlc.exe',
+          },
+        },
+      },
+      snapshot: {
+        state: 'catalog_ready',
+        disc: {
+          discId: 'disc-123',
+          drive: 'D:',
+          titles: [],
+        },
+      },
+      titles: [
+        {
+          id: 'disc-123-title-1',
+          titleNumber: 1,
+          label: 'Title 1',
+          durationSeconds: 7212,
+          likelyMainFeature: true,
+          thumbnailUrl: '/thumbnail.jpg',
+          audioTracks: [{ id: 0, label: 'English' }],
+          subtitleTracks: [{ id: 2, label: 'English SDH' }],
+        },
+      ],
+      includeShort: true,
+    })
+
+    expect(html).toContain('Auto (English preferred)')
+    expect(html).toContain('<option value="0">English</option>')
+    expect(html).toContain('<option value="">Off</option>')
+    expect(html).toContain('<option value="2">English SDH</option>')
   })
 })

@@ -145,6 +145,7 @@ function renderCatalog(input: HomePageInput): string {
           <label>
             Audio
             <select name="audioTrack">
+              <option value="">Auto (English preferred)</option>
               ${title.audioTracks.map((track) => `<option value="${track.id}">${escapeHtml(track.label)}</option>`).join('')}
             </select>
           </label>
@@ -532,7 +533,7 @@ function renderLayout(input: {
             : []
 
           logOutput.textContent = lines.length > 0
-            ? lines.join('\n')
+            ? lines.join('\\n')
             : 'No server log entries yet.'
           logOutput.scrollTop = logOutput.scrollHeight
         }
@@ -548,11 +549,11 @@ function renderLayout(input: {
           }
 
           const existingLines = logOutput.textContent && logOutput.textContent !== 'No server log entries yet.'
-            ? logOutput.textContent.split('\n').filter(Boolean)
+            ? logOutput.textContent.split('\\n').filter(Boolean)
             : []
 
           existingLines.push(nextLine)
-          logOutput.textContent = existingLines.slice(-200).join('\n')
+          logOutput.textContent = existingLines.slice(-200).join('\\n')
           logOutput.scrollTop = logOutput.scrollHeight
         }
 

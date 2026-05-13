@@ -20,11 +20,13 @@ describe('extractPlayableTitleNumbers', () => {
 })
 
 describe('parseTitleProbeLog', () => {
-  it('extracts duration and default track placeholders from a title probe log', () => {
+  it('extracts zero-based VLC track ids while keeping one-based labels for display', () => {
     const log = [
       '[000001f19445a350] main input debug: `file/directory:///C:/Users/johnm/AppData/Roaming/vlc/ml.xspf\' successfully opened',
       '[000001f195da8050] main input debug: `dvd:///F:/#1\' successfully opened',
       '[000001f19445e9f0] dvdnav demux debug:      - pgc_length=649107000',
+      '[000001f195da8050] main input debug: video is disabled, not selecting ES 0xbd20',
+      '[000001f195da8050] main input debug: video is disabled, not selecting ES 0xbd22',
       '[000001f19445e9f0] dvdnav demux debug: DVDNAV_SPU_STREAM_CHANGE',
       '[000001f19445e9f0] dvdnav demux debug:      - physical_wide=128',
       '[000001f19445e9f0] dvdnav demux debug: DVDNAV_AUDIO_STREAM_CHANGE',
@@ -33,8 +35,11 @@ describe('parseTitleProbeLog', () => {
 
     expect(parseTitleProbeLog(log)).toEqual({
       durationSeconds: 7212,
-      audioTracks: [{ id: 1, label: 'Audio 1' }],
-      subtitleTracks: [],
+      audioTracks: [{ id: 0, label: 'Audio 1' }],
+      subtitleTracks: [
+        { id: 0, label: 'Subtitle 1' },
+        { id: 2, label: 'Subtitle 3' },
+      ],
     })
   })
 })
