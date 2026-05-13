@@ -8,6 +8,10 @@
 - MDN HTMLMediaElement documentation confirms the media properties, methods, and events used by the browser player, including `play()`, `pause()`, `currentTime`, `duration`, `volume`, `muted`, `buffered`, `seekable`, `loadedmetadata`, `timeupdate`, `seeking`, `seeked`, `playing`, `waiting`, and `error`.
 - Playwright documentation confirms Playwright Test is an end-to-end test framework with test runner, assertions, isolation, parallelization, reports, and support for Chromium, Firefox, and WebKit.
 - Microsoft Playwright MCP documentation confirms Playwright MCP is a Model Context Protocol server for browser automation through accessibility snapshots. It is useful for agent-driven exploration and debugging, while Playwright Test is the better repeatable CI test framework.
+- Fastify documentation confirms `fastify.inject()` is the recommended route/plugin testing mechanism and supports an app-factory style that avoids binding a real network port during tests.
+- Vitest documentation confirms support for `setupFiles`, multi-project test configuration, and disabling `fileParallelism` for sequential process-heavy suites.
+- Playwright documentation confirms `webServer` plus `use.baseURL` is the intended way to start a local app once and exercise it through relative URLs.
+- Node.js `child_process` documentation confirms the architectural rules that matter for this repo: `spawn()` and `execFile()` can execute binaries without a shell; `shell` execution is unsafe with unsanitized input; `windowsHide` is available for Windows subprocesses; `AbortSignal` can cancel `spawn()`/`execFile()`; the `error` event covers spawn/kill/abort failures; the `close` event occurs after stdio closes and is safer than `exit` for final completion; Windows only honors a narrow subset of signals and kills abruptly; shell wrappers can leave child-of-shell processes alive when the parent is killed.
 
 ## Corrections Applied
 
@@ -15,6 +19,24 @@
 - Removed MakeMKV-style or other companion scanner paths from v1 title metadata. Title metadata SHALL come through VLC only.
 - Changed the concurrency model from multi-client same-session sharing to personal single-viewer replacement: a different title/options request stops the active session and starts the new one.
 - Set optional password protection as off by default, with warnings when serving unauthenticated LAN-visible traffic.
+
+## Command-Handling Conclusions
+
+- Managed VLC playback and thumbnail jobs should be spawned directly from the VLC executable path with an argv array, not through shell command strings.
+- `shell: true` should be avoided for VLC execution because it complicates Windows quoting and can break reliable process termination.
+- `windowsHide: true` should be enabled for managed VLC processes on Windows to avoid console-window noise.
+- The runner should determine final completion on the `close` event, not only `exit`, so stdout/stderr capture is complete before status evaluation or cleanup.
+- The runner should explicitly handle `error`, `spawn`, `close`, and timeout/abort behavior as separate lifecycle events.
+- The app should keep managed VLC sessions attached to the server process rather than using `detached`, because replacement, inactivity cleanup, and shutdown all require reliable ownership of the running process.
+- For automated tests, the preferred strategy is not to mock shell strings or `child_process` internals everywhere. Instead, isolate command creation behind a typed builder and run integration tests against a fake VLC executable that behaves like the real process boundary.
+- Process-heavy integration tests should be allowed to run sequentially when shared temp directories, ports, or fake executable state would make parallelism flaky.
+
+## Framework Conclusions
+
+- Fastify should be built through an application factory and tested through `inject()` wherever possible.
+- Vitest should own unit and Node integration coverage for the command boundary and app services.
+- Playwright Test should boot the app through `webServer` and use `baseURL` for browser tests.
+- Playwright MCP remains useful for exploratory debugging, not as the repeatable CI runner.
 
 ## Still Requires Hardware Validation
 

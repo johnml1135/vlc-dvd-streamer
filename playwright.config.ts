@@ -1,0 +1,23 @@
+import { defineConfig } from '@playwright/test'
+
+const port = 3100
+
+export default defineConfig({
+  testDir: './playwright',
+  use: {
+    baseURL: `http://127.0.0.1:${port}`,
+    headless: true,
+  },
+  webServer: {
+    command: 'npm run dev',
+    port,
+    reuseExistingServer: true,
+    env: {
+      HOST: '127.0.0.1',
+      PORT: String(port),
+      VLC_PATH: process.execPath,
+      VLC_SHIM_SCRIPT: 'test/fixtures/fake-vlc.ts',
+      DVD_DRIVE: 'D:',
+    },
+  },
+})

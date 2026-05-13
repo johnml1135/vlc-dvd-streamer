@@ -4,6 +4,8 @@ The repo is a planning scaffold for a Windows-hosted DVD streaming app. The desi
 
 The architecture is a Fastify + TypeScript server that owns state and lifecycle, plus VLC child processes that do all DVD access and media generation. VLC is a media engine only; the browser never talks directly to VLC in v1.
 
+Because the app is Windows-hosted and command-driven, process supervision is part of the core architecture, not a low-level afterthought. The codebase should not let API handlers assemble ad-hoc shell strings or manage child-process lifecycle directly. Command construction, execution, timeout handling, and shutdown behavior need first-class boundaries.
+
 User architecture decisions captured on 2026-05-13:
 
 - Password protection is optional and off by default.
@@ -38,10 +40,41 @@ User architecture decisions captured on 2026-05-13:
 
 Fastify gives typed route schemas, good testability with request injection, and a clean plugin model without making the first version heavy. The server should be organized around feature modules rather than technical layers: config, VLC worker, disc catalog, streaming sessions, API routes, WebSocket events, and frontend hosting.
 
+The app should be created through a `buildApp(deps)` factory rather than a process-global singleton. The entrypoint owns filesystem and process startup, while tests can call the same factory with fake config, temp cache directories, and fake VLC dependencies.
+
 Alternatives considered:
 
 - Express + TypeScript is familiar but gives less schema-driven structure.
 - Minimal Node HTTP keeps dependencies low but pushes too much routing, validation, and test plumbing into app code.
+
+### Decision: Separate command specs from process execution
+
+Every VLC operation should pass through two boundaries:
+
+- a command builder that turns validated business input into an executable path plus argv array
+- a process supervisor that owns `spawn`, log capture, timeout/abort control, and stop escalation
+
+This keeps Windows quoting, argument validation, and process shutdown logic out of route handlers and domain modules. It also makes the fake VLC harness straightforward: tests can validate the command builder separately from the process runner, and integration tests can substitute a fake executable without changing application code.
+
+At the architecture level, each VLC invocation should have a typed command spec containing at least:
+
+- executable path
+- argv array
+- working directory
+- environment overrides
+- timeout policy
+- log label / operation type
+- expected output contract when relevant
+
+The process supervisor should return a managed handle that exposes spawned pid, collected stdout/stderr, completion status, and cancellation controls.
+
+### Decision: Spawn VLC directly and avoid shell execution
+
+The app should execute the VLC binary directly with an argv array and `shell: false`. It should not construct shell command strings from request-derived values. On Windows, that avoids shell quoting hazards, reduces command-injection risk, and keeps the app attached to the real VLC pid it wants to supervise.
+
+Use `windowsHide: true` for managed VLC processes. Do not use `detached` for normal playback sessions because the app must stop VLC on session replacement, inactivity cleanup, disc removal, and server shutdown.
+
+The supervisor should treat the child process `error` event as a spawn or delivery failure, and treat final completion on the `close` event after stdio has drained. Timeout handling should use abort/kill plus an explicit wait for process closure before cleaning session files.
 
 ### Decision: Keep VLC as the only DVD/media boundary
 
@@ -67,6 +100,8 @@ Tests should not shell out to real VLC by default. Core tests should use a fake 
 
 Use Vitest for unit and Node integration tests. Use Playwright Test for repeatable browser automation. Use Playwright MCP only for exploratory agent-driven debugging or visual/manual acceptance, not as the CI framework.
 
+The Vitest setup should split unit and integration suites so process-heavy integration tests can run sequentially when needed. Browser automation should use Playwright's `webServer` plus `baseURL` pattern to boot the local app once and test it as a user would.
+
 ## Risks / Trade-offs
 
 - VLC `livehttp` may behave differently on Windows/VLC 3.x than the documented examples. Mitigation: validate on real hardware before polishing UI and keep command construction isolated.
@@ -74,6 +109,7 @@ Use Vitest for unit and Node integration tests. Use Playwright Test for repeatab
 - VLC-only metadata may be incomplete. Mitigation: surface unknown language/track metadata clearly and avoid pretending labels are richer than they are.
 - Optional password off by default is easier for personal LAN use but weaker if exposed broadly. Mitigation: default to explicit LAN binding, display a warning when unauthenticated on non-loopback interfaces, and keep public internet out of scope.
 - Fake VLC tests can miss real drive timing and codec issues. Mitigation: maintain an env-gated hardware validation suite and do early prototype testing with real discs.
+- Windows process semantics differ from POSIX signal semantics. Mitigation: keep one documented process-supervision path, avoid shell wrappers, and test timeout/kill behavior against the fake VLC harness before real-hardware validation.
 
 ## Migration Plan
 
