@@ -67,6 +67,23 @@ describe('app API', () => {
     expect(manifest.statusCode).toBe(200)
     expect(manifest.body).toContain('#EXTM3U')
 
+    const videoOnlyManifest = await app.inject({
+      method: 'GET',
+      url: `${started.json().manifestUrl}?videoOnly=1`,
+    })
+
+    expect(videoOnlyManifest.statusCode).toBe(200)
+    expect(videoOnlyManifest.body).toContain('segment-000001.ts?videoOnly=1')
+
+    const player = await app.inject({
+      method: 'GET',
+      url: `/player/${started.json().id}?videoOnly=1`,
+    })
+
+    expect(player.statusCode).toBe(200)
+    expect(player.body).toContain('/streams/')
+    expect(player.body).toContain('index.m3u8?videoOnly=1')
+
     const stopped = await app.inject({
       method: 'DELETE',
       url: `/api/sessions/${started.json().id}`,

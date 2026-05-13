@@ -11,6 +11,7 @@ import type { CatalogSnapshot, DiscTitle } from './disc/types.js'
 import { EventHub } from './events/event-hub.js'
 import type { SessionManager } from './session/session-manager.js'
 import { renderHomePage, renderPlayerPage } from './ui/page.js'
+import { normalizeHlsTransportStream } from './vlc/transport-stream.js'
 import type { VlcWorker } from './vlc/worker.js'
 import { findVlc } from './vlc/find-vlc.js'
 
@@ -101,6 +102,7 @@ export async function buildApp(deps: AppDeps) {
     }
 
     const sessionId = String((request.params as { sessionId: string }).sessionId)
+    const videoOnly = parseBooleanQuery((request.query as Record<string, string | undefined>)?.videoOnly)
     if (!isValidSessionId(sessionId)) {
       return sendApiError(reply, 400, 'Invalid session id.')
     }
@@ -112,7 +114,10 @@ export async function buildApp(deps: AppDeps) {
 
     sessionManager.touch(sessionId)
 
-    reply.type('text/html').send(renderPlayerPage({ session }))
+    reply.type('text/html').send(renderPlayerPage({
+      session,
+      manifestUrl: appendStreamFlag(session.manifestUrl, 'videoOnly', videoOnly),
+    }))
   })
 
   app.get('/assets/hls.mjs', async (_request, reply) => {
@@ -358,6 +363,7 @@ export async function buildApp(deps: AppDeps) {
     }
 
     const { sessionId, asset } = request.params as { sessionId: string; asset: string }
+    const videoOnly = parseBooleanQuery((request.query as Record<string, string | undefined>)?.videoOnly)
     if (!isValidSessionId(sessionId) || !isValidAssetName(asset)) {
       return sendApiError(reply, 400, 'Invalid stream path.')
     }
@@ -372,7 +378,14 @@ export async function buildApp(deps: AppDeps) {
     const filePath = join(session.outputDir, asset)
     try {
       const file = await readFile(filePath)
-      reply.type(asset.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp2t').send(file)
+      if (asset.endsWith('.m3u8')) {
+        const content = videoOnly ? rewriteManifest(file.toString('utf8'), 'videoOnly') : file
+        reply.type('application/vnd.apple.mpegurl').send(content)
+        return
+      }
+
+      const content = normalizeHlsTransportStream(file, { includeAudio: !videoOnly })
+      reply.type('video/mp2t').send(content)
     } catch {
       return sendApiError(reply, 404, 'Stream asset not found.')
     }
@@ -383,6 +396,27 @@ export async function buildApp(deps: AppDeps) {
 
 function parseBooleanQuery(value: string | undefined): boolean {
   return value === 'true' || value === '1'
+}
+
+function appendStreamFlag(url: string, key: string, enabled: boolean): string {
+  if (!enabled) {
+    return url
+  }
+
+  return `${url}${url.includes('?') ? '&' : '?'}${key}=1`
+}
+
+function rewriteManifest(manifest: string, key: string): string {
+  return manifest
+    .split(/\r?\n/)
+    .map((line) => {
+      if (!line || line.startsWith('#')) {
+        return line
+      }
+
+      return `${line}${line.includes('?') ? '&' : '?'}${key}=1`
+    })
+    .join('\n')
 }
 
 function parseOptionalNumber(value: string | undefined): number | null {

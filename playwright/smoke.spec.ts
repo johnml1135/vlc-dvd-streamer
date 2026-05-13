@@ -1,7 +1,8 @@
 import { expect, test } from '@playwright/test'
+import { openReadyCatalog } from './helpers/catalog.js'
 
 test('homepage renders catalog and starts a session', async ({ page }) => {
-  await page.goto('/')
+  await openReadyCatalog(page)
 
   await expect(page.getByRole('heading', { name: 'DVD Streamer' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Title 1' })).toBeVisible()

@@ -44,6 +44,7 @@ export function buildHlsArgs(input: HlsArgsInput): string[] {
     'dummy',
     '--no-video-title-show',
     '--deinterlace',
+    '--no-sout-all',
     '--sout-x264-preset=veryfast',
   ]
 
@@ -57,7 +58,7 @@ export function buildHlsArgs(input: HlsArgsInput): string[] {
 
   args.push(
     buildDvdTitleMrl({ drive: input.drive, titleNumber: input.titleNumber }),
-    `--sout=#transcode{vcodec=h264,acodec=mp4a,scodec=dvbs}:std{access=livehttp{seglen=2,delsegs=true,numsegs=4,index=${join(input.outputDir, 'index.m3u8')},index-url=${input.baseUrl}segment-######.ts},mux=ts{use-key-frames},dst=${join(input.outputDir, 'segment-######.ts')}}`,
+    `--sout=#transcode{vcodec=h264,aenc=avcodec,acodec=mp4a,ab=128,channels=2,samplerate=48000,scodec=dvbs}:std{access=livehttp{seglen=2,delsegs=true,numsegs=4,index=${join(input.outputDir, 'index.m3u8')},index-url=${input.baseUrl}segment-######.ts},mux=ts{use-key-frames},dst=${join(input.outputDir, 'segment-######.ts')}}`,
     'vlc://quit',
   )
 

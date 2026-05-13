@@ -4,12 +4,13 @@ const port = 3100
 
 export default defineConfig({
   testDir: './playwright',
+  workers: 1,
   use: {
     baseURL: `http://127.0.0.1:${port}`,
     headless: true,
   },
   webServer: {
-    command: 'npm run dev',
+    command: 'npm start',
     port,
     reuseExistingServer: true,
     env: {

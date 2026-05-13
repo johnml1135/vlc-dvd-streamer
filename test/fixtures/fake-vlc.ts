@@ -18,6 +18,7 @@ const delayMs = Number(getArg('delayMs') ?? 0)
 const exitCode = Number(getArg('exitCode') ?? 0)
 const stderrMessage = getArg('stderr')
 const drive = getArg('drive') ?? 'D:'
+const profile = process.env.FAKE_VLC_PROFILE ?? 'healthy'
 
 const scanPayload = {
   discId: 'fake-disc-001',
@@ -52,6 +53,16 @@ if (delayMs > 0) {
 }
 
 await mkdir(outDir, { recursive: true })
+
+if (profile === 'scratched-scan' && mode === 'scan') {
+  console.error('Scratched disc read error prevented DVD scan metadata from being extracted.')
+  process.exit(exitCode || 2)
+}
+
+if (profile === 'scratched-playback' && mode === 'hls-server') {
+  console.error('Scratched disc read error prevented a playable HLS stream from being produced.')
+  process.exit(exitCode || 3)
+}
 
 if (mode === 'scan') {
   console.log(JSON.stringify(scanPayload))

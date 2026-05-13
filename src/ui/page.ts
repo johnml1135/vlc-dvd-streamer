@@ -19,6 +19,7 @@ interface HomePageInput {
 
 interface PlayerPageInput {
   session: PlaybackSession
+  manifestUrl?: string
 }
 
 export function renderHomePage(input: HomePageInput): string {
@@ -40,6 +41,7 @@ export function renderHomePage(input: HomePageInput): string {
 
 export function renderPlayerPage(input: PlayerPageInput): string {
   const session = input.session
+  const manifestUrl = input.manifestUrl ?? session.manifestUrl
 
   return renderLayout({
     title: 'Now Playing',
@@ -51,9 +53,9 @@ export function renderPlayerPage(input: PlayerPageInput): string {
       <section class="player-shell">
         <div class="player-meta">
           <p class="meta-label">Manifest URL</p>
-          <a class="manifest-link" href="${escapeHtml(session.manifestUrl)}">${escapeHtml(session.manifestUrl)}</a>
+          <a class="manifest-link" href="${escapeHtml(manifestUrl)}">${escapeHtml(manifestUrl)}</a>
         </div>
-        <video id="player" controls playsinline muted data-manifest-url="${escapeHtml(session.manifestUrl)}"></video>
+        <video id="player" controls playsinline muted data-manifest-url="${escapeHtml(manifestUrl)}"></video>
         <p id="player-status" class="player-status">Attaching HLS stream...</p>
         <div class="player-actions">
           <a class="ghost-link" href="/">Back to titles</a>
@@ -65,32 +67,52 @@ export function renderPlayerPage(input: PlayerPageInput): string {
       <script type="module">
         const video = document.getElementById('player')
         const status = document.getElementById('player-status')
-        const manifestUrl = video?.dataset.manifestUrl
+        const manifestUrl = video && video.dataset ? video.dataset.manifestUrl : undefined
+
+        function appendStreamFlag(url, key) {
+          if (url.indexOf(key + '=1') !== -1) {
+            return url
+          }
+
+          return url + (url.includes('?') ? '&' : '?') + key + '=1'
+        }
 
         async function attachStream() {
           if (!video || !manifestUrl || !status) {
             return
           }
 
-          if (video.canPlayType('application/vnd.apple.mpegurl')) {
-            video.src = manifestUrl
-            status.textContent = 'Using native HLS support.'
-            return
-          }
+          const userAgent = navigator.userAgent
+          const isEmbeddedCodeBrowser = userAgent.includes('Code/')
+          const isChromiumBrowser = /Chrom(e|ium)|Edg|OPR|Electron/.test(userAgent) || isEmbeddedCodeBrowser
+          const prefersNativeHls = video.canPlayType('application/vnd.apple.mpegurl')
+            && /Safari\\//.test(userAgent)
+            && !isChromiumBrowser
+          const playbackManifestUrl = isEmbeddedCodeBrowser
+            ? appendStreamFlag(manifestUrl, 'videoOnly')
+            : manifestUrl
 
           try {
             const module = await import('/assets/hls.mjs')
             const Hls = module.default
 
-            if (Hls?.isSupported?.()) {
+            if (!prefersNativeHls && Hls && typeof Hls.isSupported === 'function' && Hls.isSupported()) {
               const hls = new Hls()
-              hls.loadSource(manifestUrl)
+              hls.loadSource(playbackManifestUrl)
               hls.attachMedia(video)
-              status.textContent = 'Using hls.js fallback.'
+              status.textContent = isEmbeddedCodeBrowser
+                ? 'Using hls.js fallback without audio in the embedded browser.'
+                : 'Using hls.js fallback.'
               return
             }
-          } catch {
+          } catch (error) {
             // Fall back to a clear message below.
+          }
+
+          if (prefersNativeHls) {
+            video.src = manifestUrl
+            status.textContent = 'Using native HLS support.'
+            return
           }
 
           status.textContent = 'Manifest is ready. This browser needs native HLS or hls.js support to render the stream.'
