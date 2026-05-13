@@ -14,12 +14,14 @@ import { renderHomePage, renderPlayerPage } from './ui/page.js'
 import { normalizeHlsTransportStream } from './vlc/transport-stream.js'
 import type { VlcWorker } from './vlc/worker.js'
 import { findVlc } from './vlc/find-vlc.js'
+import type { ServerLog } from './logging/server-log.js'
 
 interface AppServices {
   catalogService?: CatalogService
   eventHub?: EventHub
   sessionManager?: SessionManager
   vlcWorker?: VlcWorker
+  serverLog?: ServerLog
 }
 
 export interface AppDeps {
@@ -47,6 +49,7 @@ export async function buildApp(deps: AppDeps) {
   const app = Fastify()
   const services = deps.services as AppServices
   const eventHub = services.eventHub ?? new EventHub()
+  const serverLog = services.serverLog
 
   await app.register(formbody)
   await app.register(websocket)
@@ -205,6 +208,10 @@ export async function buildApp(deps: AppDeps) {
     }
 
     return catalogService.getSnapshot()
+  })
+
+  app.get('/api/logs', async () => {
+    return serverLog?.list() ?? []
   })
 
   app.post('/api/discs/current/refresh', async (_request, reply) => {

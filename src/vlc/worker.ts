@@ -5,6 +5,7 @@ import { runManagedProcess, spawnManagedProcess, type ManagedProcessHandle } fro
 import type { RawDiscScan, RawDiscTitle } from '../disc/types.js'
 import { buildDvdDiscMrl, buildDvdTitleMrl } from './mrl.js'
 import { extractPlayableTitleNumbers, parseTitleProbeLog } from './scan-parser.js'
+import type { ServerLog } from '../logging/server-log.js'
 
 export interface StartHlsSessionInput {
   drive: string
@@ -29,6 +30,8 @@ export interface VlcWorkerOptions {
   drive: string
   timeoutMs: number
   shimScript?: string
+  shimEnv?: NodeJS.ProcessEnv
+  logger?: ServerLog
 }
 
 export class VlcWorker {
@@ -40,27 +43,39 @@ export class VlcWorker {
 
   async scanDisc(input: { drive?: string } = {}): Promise<RawDiscScan> {
     const drive = input.drive ?? this.options.drive
+    this.options.logger?.info('catalog', `Starting DVD scan for ${drive}.`)
 
-    if (!this.options.shimScript) {
-      return this.scanDiscWithRealVlc(drive)
+    try {
+      let scan: RawDiscScan
+
+      if (!this.options.shimScript) {
+        scan = await this.scanDiscWithRealVlc(drive)
+      } else {
+        const result = await runManagedProcess(this.buildShimCommand('vlc-scan', ['--mode=scan', `--drive=${drive}`]))
+
+        const payload = result.stdout
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .at(-1)
+
+        if (!result.ok || !payload) {
+          throw new Error(result.stderr || 'VLC scan did not return disc metadata.')
+        }
+
+        scan = JSON.parse(payload) as RawDiscScan
+      }
+
+      this.options.logger?.info('catalog', `DVD scan finished with ${scan.titles.length} titles.`)
+      return scan
+    } catch (error) {
+      this.options.logger?.error('catalog', `DVD scan failed: ${error instanceof Error ? error.message : 'Unknown scan error.'}`)
+      throw error
     }
-
-    const result = await runManagedProcess(this.buildShimCommand('vlc-scan', ['--mode=scan', `--drive=${drive}`]))
-
-    const payload = result.stdout
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .at(-1)
-
-    if (!result.ok || !payload) {
-      throw new Error(result.stderr || 'VLC scan did not return disc metadata.')
-    }
-
-    return JSON.parse(payload) as RawDiscScan
   }
 
   private async scanDiscWithRealVlc(drive: string): Promise<RawDiscScan> {
+    this.options.logger?.info('catalog', `Running VLC disc probe for ${drive}.`)
     const discProbe = await runManagedProcess(
       createCommandSpec({
         executable: this.options.executable,
@@ -76,8 +91,11 @@ export class VlcWorker {
       throw new Error('VLC did not expose any playable DVD title numbers in the probe log.')
     }
 
+    this.options.logger?.info('catalog', `Disc probe discovered ${titleNumbers.length} playable titles (${titleNumbers.join(', ')}).`)
+
     const titles: RawDiscTitle[] = []
     for (const titleNumber of titleNumbers) {
+      this.options.logger?.info('catalog', `Probing metadata for title ${titleNumber}.`)
       const titleProbe = await runManagedProcess(
         createCommandSpec({
           executable: this.options.executable,
@@ -96,8 +114,10 @@ export class VlcWorker {
           audioTracks: parsed.audioTracks,
           subtitleTracks: parsed.subtitleTracks,
         })
+        this.options.logger?.info('catalog', `Title ${titleNumber} metadata ready (${parsed.durationSeconds}s).`)
       } catch {
         // Skip titles that do not yield stable timing metadata.
+        this.options.logger?.warn('catalog', `Skipping title ${titleNumber} because VLC did not produce stable duration metadata.`)
       }
     }
 
@@ -151,6 +171,11 @@ export class VlcWorker {
   }
 
   async startHlsSession(input: StartHlsSessionInput): Promise<StartHlsSessionResult> {
+    this.options.logger?.info(
+      'session',
+      `Starting HLS session for title ${input.titleNumber}${input.audioTrack ? `, audio ${input.audioTrack}` : ''}${input.subtitleTrack ? `, subtitle ${input.subtitleTrack}` : ''}.`,
+    )
+
     const command = this.options.shimScript
       ? this.buildShimCommand('vlc-hls', [
         '--mode=hls-server',
@@ -184,6 +209,9 @@ export class VlcWorker {
       args: ['--import', 'tsx', this.options.shimScript!, ...args],
       timeoutMs: this.options.timeoutMs,
       label,
+      env: this.options.shimEnv
+        ? { ...process.env, ...this.options.shimEnv }
+        : undefined,
     })
   }
 

@@ -2,12 +2,14 @@ import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { VlcWorker } from '../vlc/worker.js'
 import type { CatalogSnapshot, DiscSummary, DiscTitle, RawDiscScan } from './types.js'
+import type { ServerLog } from '../logging/server-log.js'
 
 export interface CatalogServiceOptions {
   cacheDir: string
   drive: string
   minVisibleTitleDurationSeconds: number
   worker: VlcWorker
+  logger?: ServerLog
 }
 
 export class CatalogService {
@@ -41,6 +43,7 @@ export class CatalogService {
   }
 
   async refresh(): Promise<CatalogSnapshot> {
+    this.options.logger?.info('catalog', `Refreshing DVD catalog for ${this.options.drive}.`)
     this.snapshot = {
       state: 'disc_detected',
       disc: null,
@@ -59,6 +62,7 @@ export class CatalogService {
         state: 'catalog_ready',
         disc,
       }
+      this.options.logger?.info('catalog', `Catalog ready for ${disc.discId} with ${disc.titles.length} titles.`)
     } catch (error) {
       this.snapshot = {
         state: 'catalog_error',
@@ -68,6 +72,7 @@ export class CatalogService {
           detail: error instanceof Error ? error.message : 'Unknown catalog error.',
         },
       }
+      this.options.logger?.error('catalog', this.snapshot.error?.detail ?? 'The VLC worker could not build a title catalog.')
     }
 
     return this.snapshot

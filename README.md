@@ -1,58 +1,133 @@
 # VLC DVD Streamer
 
-Turn a Windows PC with a DVD drive into a simple browser-based player for the disc that is currently inserted.
+VLC DVD Streamer turns a Windows PC with a DVD drive into a simple browser player for the disc that is in the drive right now.
 
-The intended experience is straightforward:
+The normal usage flow is:
 
-1. Put a DVD into the host machine.
-2. Open the web app from another device on your LAN.
-3. See the playable titles on that disc.
-4. Pick a title.
-5. Watch it in a normal browser video player.
+1. Install the app on the Windows PC that has the DVD drive.
+2. Leave that PC signed in on your home or office LAN.
+3. Insert a DVD.
+4. Open the app from another machine on the same network.
+5. Pick a title from the thumbnail grid.
+6. Watch in the embedded HTML5 player and maximize it if you want full screen.
 
-If you are looking for rip automation, backup workflows, or library management, this is not that project. VLC DVD Streamer is intentionally focused on playback of the DVD that is in the drive right now.
+This project is intentionally about playback, not ripping, backup, or library management.
 
-## Who It Is For
+## What The UI Does
 
-- Personal, local-network use.
-- One DVD drive.
-- One active playback session at a time.
-- One viewer switching between titles as needed.
+The UI is designed around the simplest reliable DVD workflow:
 
-## What Version 1 Is Trying To Do
+- A title grid with thumbnails so you can tell the main feature from extras.
+- Audio and subtitle choices on each title card before playback starts.
+- A dedicated player page with the normal browser video controls, which can be maximized full screen.
+- Short status messages that tell you whether VLC is available, whether the disc is still loading, and how the browser attached to the stream.
+- A single active stream model: starting a new title replaces the current session.
 
-The first version is a deterministic title-based player:
+If you want full DVD menu emulation, multiple viewers at once, or internet-facing streaming, this is not that project.
 
-- Detect the inserted DVD.
-- Build a title catalog from that disc.
-- Show title cards with screenshot, duration, and playback options.
-- Start a temporary HLS session for the selected title.
-- Play through HTML5 video, using native HLS where available and hls.js elsewhere.
+## Quick Start
 
-DVD menus are not part of v1. The app treats the disc as a collection of playable titles.
+If you just want to run it manually on the current machine:
 
-## What Version 1 Is Not Trying To Do
+```powershell
+$env:VLC_PATH = 'C:\Program Files\VideoLAN\VLC\vlc.exe'
+$env:DVD_DRIVE = 'F:'
+npm install
+npm run build
+npm start
+```
 
-- Rip discs.
-- Automate backups.
-- Emulate full DVD menus.
-- Support multiple simultaneous viewers.
-- Expose the app to the public internet.
+Then open `http://127.0.0.1:3000` on the host PC.
 
-## Status
+If you want other machines on your LAN to reach it during a manual run, bind to every interface:
 
-The repository now contains a working fake-VLC-backed vertical slice:
+```powershell
+$env:HOST = '0.0.0.0'
+$env:PORT = '3000'
+$env:VLC_PATH = 'C:\Program Files\VideoLAN\VLC\vlc.exe'
+$env:DVD_DRIVE = 'F:'
+npm run build
+npm start
+```
 
-- a Fastify + TypeScript server with health, disc, title, session, stream, and WebSocket surfaces
-- a VLC worker boundary with typed command builders, managed process supervision, thumbnail generation, and HLS session startup
-- a single-session catalog/player browser flow served directly from the app
-- Vitest integration coverage plus a Playwright smoke flow that opens the catalog and starts a session
+Then open `http://<host-pc-ip>:3000` from another device on the same network.
 
-The verified path today is the automated fake-VLC mode. Real VLC path detection is implemented, but real-disc scanning and playback still need hardware validation against Windows VLC 3.x.
+## Install It For Daily Use
 
-## Run The Verified Flow
+The Windows install script is for the appliance-style setup you asked for:
 
-Use the fake VLC shim when you want the implemented browser/catalog/session flow without a physical drive:
+- the server stays available on the local network
+- it does not open a browser automatically
+- it watches the DVD drive for disc changes
+- it refreshes the catalog when a disc is inserted, removed, or swapped
+- it creates the Windows Firewall rule needed for other machines to connect
+
+Run the installer from an elevated PowerShell window:
+
+```powershell
+npm run install:windows -- -Drive F: -Port 3000 -VlcPath 'C:\Program Files\VideoLAN\VLC\vlc.exe'
+```
+
+What the installer does:
+
+- builds the app for production use
+- writes `.runtime\installed-settings.json` with the selected drive, port, and VLC path
+- creates a scheduled task named `VLC DVD Streamer` that starts the background host at logon
+- creates a Windows Firewall inbound rule for the selected TCP port on Domain and Private networks
+- starts the background host immediately so you do not have to log out and back in
+
+After the install finishes, it prints the LAN URLs it found. Open one of those URLs from another machine on your network.
+
+## How Day-To-Day Use Works
+
+Once the installer is in place:
+
+1. Keep the host PC signed in.
+2. Insert a DVD.
+3. Wait a few seconds for the background watcher to refresh the catalog.
+4. From another machine, open `http://<host-pc-ip>:3000`.
+5. Pick a title from the thumbnail grid.
+6. Press `Start Stream`.
+7. Use the browser's maximize or full-screen control on the player page if you want a larger view.
+
+Helpful UI details:
+
+- `Show extras` reveals the shorter bonus titles that are hidden by default.
+- `Open player` returns to the active session if you already started one.
+- `Stop Stream` ends the current VLC-backed session.
+- `Back to titles` returns to the thumbnail grid without closing the server.
+
+## LAN And Firewall Notes
+
+The installed path is intended for local network access only.
+
+- The installer binds the app to `0.0.0.0`, which makes it listen on the host PC's LAN interfaces instead of only `127.0.0.1`.
+- The installer creates an inbound Windows Firewall rule for the chosen port on `Domain` and `Private` profiles.
+- If your Windows network is marked `Public`, other devices may still be blocked until you switch that network to `Private` or change the firewall rule manually.
+- This project is not set up for internet exposure. Keep it behind your home or office router.
+
+If another machine cannot connect, check these first:
+
+1. Confirm the host PC and the client device are on the same LAN.
+2. Confirm the host PC's network profile is `Private`.
+3. Confirm the firewall rule exists for the chosen port.
+4. Confirm the scheduled task is running and `.runtime\logs\background-host.log` is being updated.
+
+## Where The Installed Logs Live
+
+The Windows install path writes runtime files here:
+
+- `.runtime\installed-settings.json`
+- `.runtime\disc-state.txt`
+- `.runtime\logs\background-host.log`
+- `.runtime\logs\server.stdout.log`
+- `.runtime\logs\server.stderr.log`
+
+If you change the DVD drive letter, the port, or the VLC install path, rerun the installer with the new values.
+
+## Development And Testing
+
+Use the fake VLC shim when you want the full browser flow without a physical drive:
 
 ```powershell
 $env:VLC_PATH = (Get-Command node).Source
@@ -60,40 +135,25 @@ $env:VLC_SHIM_SCRIPT = 'test/fixtures/fake-vlc.ts'
 npm run dev
 ```
 
-Then open `http://127.0.0.1:3000`.
-
-## Test And Build
+The main validation commands are:
 
 ```powershell
-npm test
 npm run typecheck
+npm test
 npm run build
-npm run test:e2e -- playwright/smoke.spec.ts
+npm run test:e2e
 ```
 
-## Hardware Validation Notes
+## Important Limits
 
-For manual real-VLC bring-up, point `VLC_PATH` at `vlc.exe` and clear `VLC_SHIM_SCRIPT`:
+- One DVD drive.
+- One active playback session at a time.
+- Local network use only.
+- DVD menus are not part of v1.
+- DVD subtitles are image-based, so v1 supports subtitles off or burn-in, not live browser-selectable subtitle tracks.
+- Users are responsible for using the software only where they have the right to play and stream the disc content.
 
-```powershell
-$env:VLC_PATH = 'C:\Program Files\VideoLAN\VLC\vlc.exe'
-Remove-Item Env:VLC_SHIM_SCRIPT -ErrorAction Ignore
-npm run dev
-```
-
-That path currently validates executable discovery and keeps the real VLC command builders isolated in code, but real title scanning and playback commands still need physical-drive validation before treating the app as hardware-ready.
-
-## How It Works
-
-The current plan is:
-
-- VLC remains the only DVD/media engine.
-- The server owns state, session lifecycle, and file serving.
-- The browser only talks to the app server, never directly to VLC.
-- Selecting a different title stops the current playback session and starts the new one.
-- The app exposes a WebSocket feed at `/ws` for disc, catalog, thumbnail, and session updates.
-
-## Developer Documentation
+## Project Docs
 
 Core planning docs:
 
@@ -109,13 +169,6 @@ OpenSpec change artifacts for the active implementation track:
 - [Research verification](openspec/changes/implement-v1-dvd-streaming/research-verification.md)
 - [OpenSpec tasks](openspec/changes/implement-v1-dvd-streaming/tasks.md)
 - [Harness-first implementation plan](docs/superpowers/plans/2026-05-13-v1-command-harness-first-slice.md)
-
-## Important Notes
-
-- The app is for local-network use, not public internet streaming.
-- Commercial DVD behavior varies, so real-disc validation remains mandatory.
-- DVD subtitles are image-based. V1 supports subtitles off or server-side burn-in, not live browser-selectable WebVTT captions.
-- Users are responsible for using the software only where they have the right to play and stream the disc content.
 
 ## License
 

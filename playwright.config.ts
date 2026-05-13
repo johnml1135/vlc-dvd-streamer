@@ -12,7 +12,7 @@ export default defineConfig({
   webServer: {
     command: 'npm start',
     port,
-    reuseExistingServer: true,
+    reuseExistingServer: false,
     env: {
       HOST: '127.0.0.1',
       PORT: String(port),

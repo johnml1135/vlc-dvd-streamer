@@ -350,7 +350,8 @@ function renderLayout(input: {
       .toolbar,
       .active-banner,
       .waiting-card,
-      .player-shell {
+      .player-shell,
+      .log-drawer {
         margin-top: 24px;
         padding: 22px;
         border-radius: 24px;
@@ -451,9 +452,38 @@ function renderLayout(input: {
         color: var(--muted);
       }
 
+      .log-drawer summary {
+        cursor: pointer;
+        font-weight: 700;
+      }
+
+      .log-drawer[open] summary {
+        margin-bottom: 12px;
+      }
+
+      .log-help {
+        color: var(--muted);
+        margin-bottom: 12px;
+      }
+
+      .log-output {
+        margin: 0;
+        max-height: 260px;
+        overflow: auto;
+        padding: 16px;
+        border-radius: 16px;
+        border: 1px solid var(--line);
+        background: #1e1713;
+        color: #f7efe4;
+        font-family: Consolas, 'Cascadia Mono', monospace;
+        font-size: 0.9rem;
+        line-height: 1.45;
+        white-space: pre-wrap;
+      }
+
       @media (max-width: 720px) {
         main { width: min(100vw - 20px, 1120px); padding-top: 20px; }
-        .hero, .toolbar, .active-banner, .waiting-card, .player-shell { padding: 18px; border-radius: 20px; }
+        .hero, .toolbar, .active-banner, .waiting-card, .player-shell, .log-drawer { padding: 18px; border-radius: 20px; }
       }
     </style>
   </head>
@@ -468,6 +498,118 @@ function renderLayout(input: {
         <p>${escapeHtml(input.summary)}</p>
       </section>
       ${input.content}
+      <details class="log-drawer">
+        <summary>Server log</summary>
+        <p class="log-help">Live server events for disc scans, session startup, and stream lifecycle.</p>
+        <pre id="server-log-output" class="log-output">Loading server log...</pre>
+      </details>
+      <script>
+        const logOutput = document.getElementById('server-log-output')
+
+        function formatLogEntry(entry) {
+          if (!entry || typeof entry !== 'object') {
+            return ''
+          }
+
+          const timestamp = typeof entry.at === 'string' ? new Date(entry.at) : null
+          const timeLabel = timestamp && !Number.isNaN(timestamp.getTime())
+            ? timestamp.toLocaleTimeString()
+            : '--:--:--'
+          const level = typeof entry.level === 'string' ? entry.level.toUpperCase() : 'INFO'
+          const scope = typeof entry.scope === 'string' ? entry.scope : 'server'
+          const message = typeof entry.message === 'string' ? entry.message : ''
+
+          return '[' + timeLabel + '] [' + level + '] [' + scope + '] ' + message
+        }
+
+        function replaceLogLines(entries) {
+          if (!logOutput) {
+            return
+          }
+
+          const lines = Array.isArray(entries)
+            ? entries.map(formatLogEntry).filter(Boolean)
+            : []
+
+          logOutput.textContent = lines.length > 0
+            ? lines.join('\n')
+            : 'No server log entries yet.'
+          logOutput.scrollTop = logOutput.scrollHeight
+        }
+
+        function appendLogEntry(entry) {
+          if (!logOutput) {
+            return
+          }
+
+          const nextLine = formatLogEntry(entry)
+          if (!nextLine) {
+            return
+          }
+
+          const existingLines = logOutput.textContent && logOutput.textContent !== 'No server log entries yet.'
+            ? logOutput.textContent.split('\n').filter(Boolean)
+            : []
+
+          existingLines.push(nextLine)
+          logOutput.textContent = existingLines.slice(-200).join('\n')
+          logOutput.scrollTop = logOutput.scrollHeight
+        }
+
+        async function loadServerLogs() {
+          if (!logOutput) {
+            return
+          }
+
+          try {
+            const response = await fetch('/api/logs')
+            if (!response.ok) {
+              throw new Error('Could not load logs.')
+            }
+
+            replaceLogLines(await response.json())
+          } catch (error) {
+            logOutput.textContent = 'Could not load server log.'
+          }
+        }
+
+        function connectServerLogStream() {
+          if (!logOutput) {
+            return
+          }
+
+          const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
+          const socket = new WebSocket(protocol + '://' + window.location.host + '/ws')
+
+          socket.addEventListener('message', (messageEvent) => {
+            let event
+            try {
+              event = JSON.parse(messageEvent.data)
+            } catch {
+              return
+            }
+
+            if (!event || typeof event.type !== 'string') {
+              return
+            }
+
+            if (event.type === 'server.log') {
+              appendLogEntry(event.payload)
+              return
+            }
+
+            if (event.type === 'catalog.updated' && window.location.pathname === '/') {
+              const payload = event.payload
+              if (payload && typeof payload.state === 'string' && payload.state !== 'catalog_loading' && payload.state !== 'disc_detected') {
+                window.location.reload()
+              }
+            }
+          })
+        }
+
+        void loadServerLogs()
+        connectServerLogStream()
+      </script>
     </main>
   </body>
 </html>`

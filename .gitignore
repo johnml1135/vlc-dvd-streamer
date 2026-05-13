@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .cache/
+.runtime/
 playwright-report/
 test-results/
 coverage/

@@ -4,6 +4,7 @@ import { constants } from 'node:fs'
 import { join } from 'node:path'
 import type { ManagedProcessHandle } from '../vlc/process-supervisor.js'
 import type { VlcWorker } from '../vlc/worker.js'
+import type { ServerLog } from '../logging/server-log.js'
 
 export type SessionState = 'starting' | 'ready' | 'failed' | 'stopping' | 'stopped'
 
@@ -38,6 +39,7 @@ export interface SessionManagerOptions {
   inactivityMs: number
   worker: VlcWorker
   readinessTimeoutMs?: number
+  logger?: ServerLog
 }
 
 export class SessionManager {
@@ -79,10 +81,12 @@ export class SessionManager {
     const active = this.activeSessionId ? this.sessions.get(this.activeSessionId) : undefined
     if (active && this.isSameRequest(active, request) && active.state === 'ready') {
       active.lastAccessedAt = new Date().toISOString()
+      this.options.logger?.info('session', `Reusing active session ${active.id} for title ${active.titleNumber}.`)
       return this.toPlaybackSession(active)
     }
 
     if (active && active.state !== 'stopped') {
+      this.options.logger?.info('session', `Replacing active session ${active.id} with title ${request.titleNumber}.`)
       await this.stop(active.id)
     }
 
@@ -114,11 +118,13 @@ export class SessionManager {
 
     this.sessions.set(id, session)
     this.activeSessionId = id
+    this.options.logger?.info('session', `Session ${id} created for title ${request.titleNumber}.`)
 
     try {
       await this.waitForReadiness(session)
       session.state = 'ready'
       session.lastAccessedAt = new Date().toISOString()
+      this.options.logger?.info('session', `Session ${session.id} is ready.`)
       return this.toPlaybackSession(session)
     } catch (error) {
       session.state = 'failed'
@@ -127,6 +133,7 @@ export class SessionManager {
         detail: error instanceof Error ? error.message : 'Unknown playback startup error.',
       }
       this.activeSessionId = null
+      this.options.logger?.error('session', `Session ${session.id} failed: ${session.error.detail ?? session.error.message}`)
       return this.toPlaybackSession(session)
     }
   }
@@ -138,6 +145,7 @@ export class SessionManager {
     }
 
     session.state = 'stopping'
+    this.options.logger?.info('session', `Stopping session ${session.id}.`)
     await session.handle.stop()
     await rm(session.outputDir, { force: true, recursive: true })
     session.state = 'stopped'
@@ -165,6 +173,7 @@ export class SessionManager {
 
       const lastAccessedAt = Date.parse(session.lastAccessedAt)
       if (now - lastAccessedAt > this.options.inactivityMs) {
+        this.options.logger?.info('session', `Stopping inactive session ${session.id}.`)
         await this.stop(sessionId)
       }
     }
