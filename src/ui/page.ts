@@ -557,7 +557,40 @@ function renderLayout(input: {
       </details>
       <script>
         const logOutput = document.getElementById('server-log-output')
+        const logDrawer = document.querySelector('.log-drawer')
+        const logDrawerStorageKey = 'vlc-dvd-streamer:server-log-open'
         const playerStatus = document.getElementById('player-status')
+
+        function saveLogDrawerState() {
+          if (!logDrawer) {
+            return
+          }
+
+          try {
+            localStorage.setItem(logDrawerStorageKey, logDrawer.open ? '1' : '0')
+          } catch {
+          }
+        }
+
+        function restoreLogDrawerState() {
+          if (!logDrawer) {
+            return
+          }
+
+          try {
+            const savedState = localStorage.getItem(logDrawerStorageKey)
+            if (savedState === '1') {
+              logDrawer.open = true
+            }
+            if (savedState === '0') {
+              logDrawer.open = false
+            }
+          } catch {
+          }
+
+          logDrawer.addEventListener('toggle', saveLogDrawerState)
+          window.addEventListener('beforeunload', saveLogDrawerState)
+        }
 
         function formatLogEntry(entry) {
           if (!entry || typeof entry !== 'object') {
@@ -688,6 +721,7 @@ function renderLayout(input: {
           })
         }
 
+        restoreLogDrawerState()
         void loadServerLogs()
         connectServerLogStream()
       </script>

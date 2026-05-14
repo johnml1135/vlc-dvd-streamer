@@ -15,6 +15,23 @@ test('catalog toggles extra titles on demand', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Title 3' })).toHaveCount(0)
 })
 
+test('server log drawer keeps its open state across refreshes', async ({ page }) => {
+  await openReadyCatalog(page)
+
+  const logDrawer = page.locator('details.log-drawer')
+  await page.locator('.log-drawer summary').click()
+  await expect(logDrawer).toHaveJSProperty('open', true)
+
+  await page.reload()
+  await expect(logDrawer).toHaveJSProperty('open', true)
+
+  await page.locator('.log-drawer summary').click()
+  await expect(logDrawer).toHaveJSProperty('open', false)
+
+  await page.reload()
+  await expect(logDrawer).toHaveJSProperty('open', false)
+})
+
 test('starting with subtitles off returns home and stops the active session', async ({ page, request }) => {
   await installSyntheticHls(page)
   await openReadyCatalog(page)

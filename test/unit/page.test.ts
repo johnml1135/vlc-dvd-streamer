@@ -36,6 +36,11 @@ describe('renderPlayerPage', () => {
     expect(html).toContain('window.location.reload()')
     expect(html).toContain("lines.join('\\n')")
     expect(html).toContain("split('\\n')")
+    expect(html).toContain('server-log-open')
+    expect(html).toContain("document.querySelector('.log-drawer')")
+    expect(html).toContain("localStorage.getItem(logDrawerStorageKey)")
+    expect(html).toContain("logDrawer.addEventListener('toggle'")
+    expect(html).toContain("window.addEventListener('beforeunload'")
   })
 })
 
