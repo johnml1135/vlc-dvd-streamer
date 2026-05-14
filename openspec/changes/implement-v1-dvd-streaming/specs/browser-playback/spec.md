@@ -50,11 +50,25 @@ The browser UI SHALL play HLS through a normal HTML video element and expose exp
 - **THEN** the player SHALL show startup progress rather than a blank player.
 
 ### Requirement: Playback controls and state
-The browser UI SHALL rely on HTMLMediaElement behavior for ordinary playback controls.
+The browser UI SHALL rely on HTMLMediaElement behavior for ordinary playback controls and SHALL provide a title-level seek control when the server has DVD duration metadata.
 
 #### Scenario: User interacts with playback
 - **WHEN** playback is ready
 - **THEN** the user SHALL be able to use play, pause, seek, volume, mute, and fullscreen controls supported by the browser.
+
+#### Scenario: Full title duration is known
+- **WHEN** a playback session includes DVD title duration metadata
+- **THEN** the player SHALL show that full title duration without waiting for every HLS segment to be generated.
+
+#### Scenario: User seeks within the current buffer
+- **WHEN** the user selects a title time already present in the HTML media element's buffered ranges
+- **THEN** the player SHALL seek locally within the existing media buffer
+- **AND** it SHALL NOT ask the server to restart VLC.
+
+#### Scenario: User seeks outside the current buffer
+- **WHEN** the user selects a title time that is not present in the HTML media element's buffered ranges
+- **THEN** the player SHALL request a server-owned session seek for that title time
+- **AND** it SHALL show buffering feedback while the server prepares the new HLS window.
 
 #### Scenario: Buffering occurs
 - **WHEN** the video element emits `waiting` or related buffering state

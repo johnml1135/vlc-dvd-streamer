@@ -49,6 +49,12 @@ export function createSessionManagerStub(overrides: Partial<SessionManagerLike> 
     getActiveSession() {
       return undefined
     },
+    getStitchedManifest() {
+      return null
+    },
+    async seek() {
+      return { ok: false, reason: 'not-found', message: 'Session not found.' }
+    },
     touch() {},
     async stop() {
       return false

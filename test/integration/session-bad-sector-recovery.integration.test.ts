@@ -64,7 +64,7 @@ describe('SessionManager bad-sector recovery', () => {
         endSeconds: 12,
       })
       expect(events.some((event) => event.type === 'session.recovery')).toBe(true)
-      await access(join(recovered?.outputDir ?? '', 'segment-000002.ts'))
+      await access(join(recovered?.outputDir ?? '', 'segment-000007.ts'))
     } finally {
       await manager.stopAll()
     }

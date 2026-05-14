@@ -24,6 +24,10 @@ interface SessionParams {
   sessionId: string
 }
 
+interface SeekBody {
+  positionSeconds?: unknown
+}
+
 export async function registerApiRoutes(app: FastifyInstance, context: AppContext): Promise<void> {
   app.get('/api/health', async () => getHealthSnapshot(context.config))
 
@@ -160,6 +164,37 @@ export async function registerApiRoutes(app: FastifyInstance, context: AppContex
     return session
   })
 
+  app.post<{ Params: SessionParams; Body: SeekBody }>('/api/sessions/:sessionId/seek', async (request, reply) => {
+    const sessionManager = context.services.sessionManager
+    if (!sessionManager) {
+      return sendApiError(reply, 503, 'Session manager is not configured.')
+    }
+
+    const { sessionId } = request.params
+    if (!isValidSessionId(sessionId)) {
+      return sendApiError(reply, 400, 'Invalid session id.')
+    }
+
+    const positionSeconds = parseFiniteSeconds(request.body?.positionSeconds)
+    if (positionSeconds === null) {
+      return sendApiError(reply, 400, 'Seek position must be a finite non-negative number.')
+    }
+
+    const result = await sessionManager.seek(sessionId, { positionSeconds })
+    if (!result.ok) {
+      const statusCodeByReason = {
+        'invalid-position': 400,
+        'not-found': 404,
+        'not-ready': 409,
+        'not-seekable': 409,
+      } satisfies Record<typeof result.reason, number>
+      return sendApiError(reply, statusCodeByReason[result.reason], result.message)
+    }
+
+    context.eventHub.publish({ type: 'session.updated', payload: result.session })
+    return result
+  })
+
   app.delete<{ Params: SessionParams }>('/api/sessions/:sessionId', async (request, reply) => {
     const sessionManager = context.services.sessionManager
     if (!sessionManager) {
@@ -175,4 +210,17 @@ export async function registerApiRoutes(app: FastifyInstance, context: AppContex
     context.eventHub.publish({ type: 'session.updated', payload: { sessionId, stopped } })
     return { stopped }
   })
+}
+
+function parseFiniteSeconds(value: unknown): number | null {
+  if (typeof value !== 'number' && typeof value !== 'string') {
+    return null
+  }
+
+  if (typeof value === 'string' && value.trim() === '') {
+    return null
+  }
+
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null
 }

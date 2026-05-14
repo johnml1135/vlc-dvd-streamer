@@ -58,6 +58,7 @@ describe('buildHlsArgs', () => {
     expect(args).toContain('--sub-track=2')
     expect(args).toContain('dvd:///D:/#4')
     expect(args.some((arg) => arg.includes('livehttp'))).toBe(true)
+    expect(args.some((arg) => arg.includes('delsegs=false'))).toBe(true)
     expect(args.some((arg) => arg.includes('soverlay'))).toBe(true)
     expect(args.some((arg) => arg.includes('scodec=dvbs'))).toBe(false)
     expect(args.some((arg) => arg.includes('index.m3u8'))).toBe(true)

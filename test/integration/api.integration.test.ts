@@ -244,4 +244,79 @@ describe('app API', () => {
       await app.close()
     }
   })
+
+  it('seeks an existing session and serves its stitched manifest', async () => {
+    const session = {
+      id: 'session-1',
+      discId: 'disc-001',
+      drive: 'D:',
+      titleNumber: 1,
+      durationSeconds: 120,
+      state: 'ready' as const,
+      outputDir: '.cache/sessions/session-1',
+      manifestPath: '.cache/sessions/session-1/index.m3u8',
+      manifestUrl: '/streams/session-1/index.m3u8',
+      startedAt: '2026-01-01T00:00:00.000Z',
+      lastAccessedAt: '2026-01-01T00:00:00.000Z',
+      timeline: {
+        durationSeconds: 120,
+        status: 'idle' as const,
+        currentRange: { startSeconds: 20, endSeconds: 28 },
+        generatedRanges: [
+          { startSeconds: 0, endSeconds: 8 },
+          { startSeconds: 20, endSeconds: 28 },
+        ],
+        stitchedManifestUrl: '/streams/session-1/stitched.m3u8',
+      },
+    }
+    const seek = vi.fn().mockResolvedValue({
+      ok: true,
+      action: 'restarted',
+      positionSeconds: 20,
+      session,
+    })
+    const app = await buildApp({
+      config: {
+        host: '127.0.0.1',
+        port: 3000,
+        cacheDir: '.cache',
+        vlcCandidates: [process.execPath],
+      },
+      services: {
+        sessionManager: createSessionManagerStub({
+          getSession() {
+            return session
+          },
+          getStitchedManifest() {
+            return '#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nsegment-000001.ts\n'
+          },
+          seek,
+        }),
+      },
+    })
+
+    try {
+      const seekResponse = await app.inject({
+        method: 'POST',
+        url: '/api/sessions/session-1/seek',
+        payload: { positionSeconds: '20' },
+      })
+
+      expect(seekResponse.statusCode).toBe(200)
+      expect(seekResponse.json()).toMatchObject({
+        ok: true,
+        action: 'restarted',
+        positionSeconds: 20,
+      })
+      expect(seek).toHaveBeenCalledWith('session-1', { positionSeconds: 20 })
+
+      const stitched = await app.inject({ method: 'GET', url: '/streams/session-1/stitched.m3u8?videoOnly=1' })
+
+      expect(stitched.statusCode).toBe(200)
+      expect(stitched.headers['content-type']).toContain('application/vnd.apple.mpegurl')
+      expect(stitched.body).toContain('segment-000001.ts?videoOnly=1')
+    } finally {
+      await app.close()
+    }
+  })
 })

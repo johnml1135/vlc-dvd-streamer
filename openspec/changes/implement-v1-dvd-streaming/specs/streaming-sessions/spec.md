@@ -39,6 +39,28 @@ The system SHALL expose deterministic session states during playback lifecycle.
 - **WHEN** the user stops playback, the disc is removed, inactivity expires, or a replacement starts
 - **THEN** the session SHALL transition through `stopping` to `stopped`.
 
+### Requirement: Title timeline seeking
+The system SHALL manage seeks against the DVD title timeline while keeping VLC process control server-owned.
+
+#### Scenario: Duration metadata exists
+- **WHEN** a playback session starts for a cataloged title
+- **THEN** the session SHALL expose the title duration and current generated title-time ranges.
+
+#### Scenario: Seek target is already available
+- **WHEN** a seek request targets a title time in the current HLS window
+- **THEN** the session manager SHALL report the target as already available
+- **AND** it SHALL NOT restart VLC.
+
+#### Scenario: Seek target is not available
+- **WHEN** a seek request targets a title time outside the current HLS window
+- **THEN** the session manager SHALL stop the current VLC process
+- **AND** restart VLC at that title time using absolute HLS segment numbering.
+
+#### Scenario: Generated ranges accumulate
+- **WHEN** VLC writes HLS segment files before or after seeks
+- **THEN** the session manager SHALL retain generated segment ranges for the active session
+- **AND** expose a stitched manifest representing the generated ranges with discontinuity markers when gaps remain.
+
 ### Requirement: HLS readiness detection
 The system SHALL wait for concrete HLS files before telling the browser to play.
 
@@ -60,6 +82,11 @@ The system SHALL serve only files belonging to known stream sessions.
 #### Scenario: Manifest is requested
 - **WHEN** a client requests `/streams/:sessionId/index.m3u8` for a known session
 - **THEN** the server SHALL return that session's playlist file with an HLS-compatible content type.
+
+#### Scenario: Stitched manifest is requested
+- **WHEN** a client requests `/streams/:sessionId/stitched.m3u8` for a known session
+- **THEN** the server SHALL return a manifest over retained generated segment files
+- **AND** it SHALL include discontinuity markers between non-contiguous generated ranges.
 
 #### Scenario: Segment is requested
 - **WHEN** a client requests `/streams/:sessionId/:segmentName.ts` for a known session

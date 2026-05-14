@@ -132,6 +132,7 @@ describe('http playback helpers', () => {
       discId: 'disc-001',
       drive: 'F:',
       titleNumber: 1,
+      durationSeconds: 7200,
       audioTrack: 1,
       subtitleTrack: 2,
     })
@@ -202,6 +203,7 @@ describe('http playback helpers', () => {
       discId: 'disc-001',
       drive: 'F:',
       titleNumber: 1,
+      durationSeconds: 7200,
       audioTrack: undefined,
       subtitleTrack: undefined,
     })

@@ -82,7 +82,12 @@ The system SHALL use VLC to transcode a selected DVD title into HLS playlist and
 
 #### Scenario: HLS command is built
 - **WHEN** a session starts for a selected title and options
-- **THEN** the command SHALL include dummy interface mode, DVD menu bypass, selected audio track when provided, the title MRL, H.264 video, AAC audio, MPEG-TS segments, livehttp access output, index path, index URL, segment destination pattern, and deinterlace settings.
+- **THEN** the command SHALL include dummy interface mode, DVD menu bypass, selected audio track when provided, the title MRL, H.264 video, AAC audio, MPEG-TS segments, livehttp access output, index path, index URL, segment destination pattern, retained segment files, and deinterlace settings.
+
+#### Scenario: HLS command restarts at a title time
+- **WHEN** a session seek or bad-sector recovery restarts playback at a later title time
+- **THEN** the command SHALL include VLC start-time seeking
+- **AND** it SHALL set an absolute livehttp initial segment number for that title time.
 
 #### Scenario: Manifest and first segment are written
 - **WHEN** VLC writes `index.m3u8` and at least one `.ts` segment

@@ -11,6 +11,7 @@ export interface SessionRequest {
   discId: string
   drive: string
   titleNumber: number
+  durationSeconds?: number
   audioTrack?: number
   subtitleTrack?: number
 }
@@ -28,14 +29,55 @@ export interface PlaybackSession extends SessionRequest {
     detail?: string
   }
   recovery?: PlaybackRecoverySnapshot
+  timeline?: PlaybackTimelineSnapshot
 }
 
 interface SessionRecord extends PlaybackSession {
   handle: ManagedProcessHandle
   baseUrl: string
   recoveryRuntime: PlaybackRecoveryRuntime
+  timelineRuntime: PlaybackTimelineRuntime
   recoveryTimer?: NodeJS.Timeout
   recoveryInFlight: boolean
+}
+
+export interface PlaybackTimelineRange {
+  startSeconds: number
+  endSeconds: number
+}
+
+export type PlaybackTimelineStatus = 'idle' | 'seeking'
+
+export interface PlaybackTimelineSnapshot {
+  durationSeconds?: number
+  status: PlaybackTimelineStatus
+  currentRange: PlaybackTimelineRange
+  generatedRanges: PlaybackTimelineRange[]
+  stitchedManifestUrl: string
+  lastSeekSeconds?: number
+  message?: string
+}
+
+interface PlaybackTimelineRuntime {
+  durationSeconds?: number
+  status: PlaybackTimelineStatus
+  currentRange: PlaybackTimelineRange
+  generatedSegmentNumbers: Set<number>
+  lastSeekSeconds?: number
+  message?: string
+}
+
+export type PlaybackSeekAction = 'already-available' | 'restarted'
+
+export type PlaybackSeekResult = {
+  ok: true
+  action: PlaybackSeekAction
+  positionSeconds: number
+  session: PlaybackSession
+} | {
+  ok: false
+  reason: 'not-found' | 'not-ready' | 'not-seekable' | 'invalid-position'
+  message: string
 }
 
 export interface PlaybackRecoveryRange {
@@ -140,6 +182,15 @@ export class SessionManager {
     return this.getSession(this.activeSessionId)
   }
 
+  getStitchedManifest(sessionId: string): string | null {
+    const session = this.sessions.get(sessionId)
+    if (!session) {
+      return null
+    }
+
+    return buildStitchedManifest(session, this.getRecoveryOptions().segmentDurationSeconds)
+  }
+
   touch(sessionId: string): void {
     const session = this.sessions.get(sessionId)
     if (!session || session.state === 'stopped' || session.state === 'failed') {
@@ -147,6 +198,97 @@ export class SessionManager {
     }
 
     session.lastAccessedAt = new Date().toISOString()
+  }
+
+  async seek(sessionId: string, input: { positionSeconds: number }): Promise<PlaybackSeekResult> {
+    const session = this.sessions.get(sessionId)
+    if (!session) {
+      return { ok: false, reason: 'not-found', message: 'Session not found.' }
+    }
+
+    if (session.state !== 'ready') {
+      return { ok: false, reason: 'not-ready', message: 'Session is not ready for seeking.' }
+    }
+
+    const recoveryOptions = this.getRecoveryOptions()
+    const positionSeconds = normalizeSeekPosition(input.positionSeconds, session.timelineRuntime.durationSeconds, recoveryOptions.segmentDurationSeconds)
+    if (positionSeconds === null) {
+      return { ok: false, reason: 'invalid-position', message: 'Seek position must be a finite non-negative number within the title duration.' }
+    }
+
+    session.lastAccessedAt = new Date().toISOString()
+
+    if (isTimeInRange(positionSeconds, session.timelineRuntime.currentRange)) {
+      session.timelineRuntime.status = 'idle'
+      session.timelineRuntime.lastSeekSeconds = positionSeconds
+      session.timelineRuntime.message = `Title time ${positionSeconds} seconds is already available in the current HLS window.`
+      return {
+        ok: true,
+        action: 'already-available',
+        positionSeconds,
+        session: this.toPlaybackSession(session),
+      }
+    }
+
+    this.clearRecoveryMonitor(session)
+    const previousSegmentName = session.recoveryRuntime.lastSegmentName
+    const initialSegmentNumber = segmentNumberForTime(positionSeconds, recoveryOptions.segmentDurationSeconds)
+
+    session.timelineRuntime.status = 'seeking'
+    session.timelineRuntime.lastSeekSeconds = positionSeconds
+    session.timelineRuntime.message = `Seeking to ${positionSeconds} seconds.`
+    this.publishSessionEvent({
+      type: 'session.seek',
+      payload: {
+        sessionId: session.id,
+        status: session.timelineRuntime.status,
+        positionSeconds,
+      },
+    })
+
+    await this.stopHandle(session.handle, `seek session ${session.id}`)
+
+    try {
+      const runtime = await this.options.worker.startHlsSession({
+        drive: session.drive,
+        titleNumber: session.titleNumber,
+        audioTrack: session.audioTrack,
+        subtitleTrack: session.subtitleTrack,
+        outputDir: session.outputDir,
+        baseUrl: session.baseUrl,
+        startTimeSeconds: positionSeconds,
+        initialSegmentNumber,
+      })
+      session.handle = runtime.handle
+      session.manifestPath = runtime.manifestPath
+      session.recoveryRuntime.epoch += 1
+      session.recoveryRuntime.epochStartTimeSeconds = positionSeconds
+      session.recoveryRuntime.epochInitialSegmentNumber = initialSegmentNumber
+
+      const progress = await this.waitForRecoveryReadiness(session, previousSegmentName)
+      this.notePlaybackProgress(session, progress, Date.now())
+      session.timelineRuntime.status = 'idle'
+      session.timelineRuntime.message = `Ready at ${positionSeconds} seconds.`
+      session.lastAccessedAt = new Date().toISOString()
+      this.publishSessionEvent({ type: 'session.updated', payload: this.toPlaybackSession(session) })
+      this.scheduleRecoveryMonitor(session)
+      return {
+        ok: true,
+        action: 'restarted',
+        positionSeconds,
+        session: this.toPlaybackSession(session),
+      }
+    } catch (error) {
+      session.timelineRuntime.status = 'idle'
+      session.timelineRuntime.message = `Seek did not produce HLS output: ${formatError(error)}`
+      session.error = {
+        message: 'Playback seek failed.',
+        detail: formatError(error),
+      }
+      this.publishSessionEvent({ type: 'session.updated', payload: this.toPlaybackSession(session) })
+      this.scheduleRecoveryMonitor(session)
+      return { ok: false, reason: 'not-ready', message: session.error.detail ?? session.error.message }
+    }
   }
 
   async start(request: SessionRequest): Promise<PlaybackSession> {
@@ -189,6 +331,7 @@ export class SessionManager {
       handle: runtime.handle,
       baseUrl,
       recoveryRuntime: createInitialRecoveryRuntime(this.getRecoveryOptions().enabled),
+      timelineRuntime: createInitialTimelineRuntime(request.durationSeconds),
       recoveryInFlight: false,
     }
 
@@ -329,6 +472,7 @@ export class SessionManager {
       discId: session.discId,
       drive: session.drive,
       titleNumber: session.titleNumber,
+      durationSeconds: session.durationSeconds,
       audioTrack: session.audioTrack,
       subtitleTrack: session.subtitleTrack,
       id: session.id,
@@ -340,6 +484,7 @@ export class SessionManager {
       lastAccessedAt: session.lastAccessedAt,
       error: session.error,
       recovery: session.recovery,
+      timeline: this.toTimelineSnapshot(session),
     }
   }
 
@@ -415,7 +560,7 @@ export class SessionManager {
     const previousSegmentName = session.recoveryRuntime.lastSegmentName
     const previousLastGoodTimeSeconds = session.recoveryRuntime.lastGoodTimeSeconds
     const resumeTimeSeconds = previousLastGoodTimeSeconds + recoveryOptions.skipSeconds * nextAttempt
-    const initialSegmentNumber = (session.recoveryRuntime.lastSegmentNumber ?? 0) + 1
+    const initialSegmentNumber = segmentNumberForTime(resumeTimeSeconds, recoveryOptions.segmentDurationSeconds)
 
     session.recoveryRuntime.status = 'recovering'
     session.recoveryRuntime.attempts += 1
@@ -530,6 +675,7 @@ export class SessionManager {
   private notePlaybackProgress(session: SessionRecord, progress: HlsProgress, nowMs: number): void {
     const recoveryOptions = this.getRecoveryOptions()
     const runtime = session.recoveryRuntime
+    this.noteTimelineProgress(session, progress)
     runtime.lastSegmentName = progress.lastSegmentName
     runtime.lastSegmentNumber = progress.lastSegmentNumber
     runtime.lastProgressAtMs = nowMs
@@ -594,6 +740,52 @@ export class SessionManager {
     }
   }
 
+  private toTimelineSnapshot(session: SessionRecord): PlaybackTimelineSnapshot {
+    const timeline = session.timelineRuntime
+    return {
+      durationSeconds: timeline.durationSeconds,
+      status: timeline.status,
+      currentRange: { ...timeline.currentRange },
+      generatedRanges: rangesFromSegmentNumbers(
+        timeline.generatedSegmentNumbers,
+        this.getRecoveryOptions().segmentDurationSeconds,
+        timeline.durationSeconds,
+      ),
+      stitchedManifestUrl: `${session.baseUrl}stitched.m3u8`,
+      lastSeekSeconds: timeline.lastSeekSeconds,
+      message: timeline.message,
+    }
+  }
+
+  private noteTimelineProgress(session: SessionRecord, progress: HlsProgress): void {
+    const segmentDurationSeconds = this.getRecoveryOptions().segmentDurationSeconds
+    const segmentNumbers = progress.segmentNames
+      .map(parseSegmentNumber)
+      .filter((segmentNumber): segmentNumber is number => segmentNumber !== null)
+
+    if (segmentNumbers.length === 0) {
+      return
+    }
+
+    for (const segmentNumber of segmentNumbers) {
+      session.timelineRuntime.generatedSegmentNumbers.add(segmentNumber)
+    }
+
+    const firstSegmentNumber = segmentNumbers[0]
+    const lastSegmentNumber = segmentNumbers.at(-1)
+    if (typeof firstSegmentNumber !== 'number' || typeof lastSegmentNumber !== 'number') {
+      return
+    }
+
+    session.timelineRuntime.currentRange = {
+      startSeconds: segmentStartSeconds(firstSegmentNumber, segmentDurationSeconds),
+      endSeconds: capDuration(
+        segmentEndSeconds(lastSegmentNumber, segmentDurationSeconds),
+        session.timelineRuntime.durationSeconds,
+      ),
+    }
+  }
+
   private getRecoveryOptions(): Required<PlaybackRecoveryOptions> {
     return {
       ...DEFAULT_RECOVERY_OPTIONS,
@@ -621,6 +813,135 @@ function createInitialRecoveryRuntime(enabled: boolean): PlaybackRecoveryRuntime
     epochInitialSegmentNumber: 1,
     badRanges: [],
   }
+}
+
+function createInitialTimelineRuntime(durationSeconds: number | undefined): PlaybackTimelineRuntime {
+  return {
+    durationSeconds,
+    status: 'idle',
+    currentRange: { startSeconds: 0, endSeconds: 0 },
+    generatedSegmentNumbers: new Set<number>(),
+  }
+}
+
+function normalizeSeekPosition(positionSeconds: number, durationSeconds: number | undefined, segmentDurationSeconds: number): number | null {
+  if (!Number.isFinite(positionSeconds) || positionSeconds < 0) {
+    return null
+  }
+
+  if (typeof durationSeconds === 'number' && positionSeconds > durationSeconds) {
+    return null
+  }
+
+  const alignedPositionSeconds = Math.floor(positionSeconds / segmentDurationSeconds) * segmentDurationSeconds
+  if (typeof durationSeconds === 'number') {
+    return Math.min(alignedPositionSeconds, Math.max(0, durationSeconds - segmentDurationSeconds))
+  }
+
+  return alignedPositionSeconds
+}
+
+function isTimeInRange(positionSeconds: number, range: PlaybackTimelineRange): boolean {
+  return positionSeconds >= range.startSeconds && positionSeconds < range.endSeconds
+}
+
+function segmentNumberForTime(positionSeconds: number, segmentDurationSeconds: number): number {
+  return Math.floor(positionSeconds / segmentDurationSeconds) + 1
+}
+
+function segmentStartSeconds(segmentNumber: number, segmentDurationSeconds: number): number {
+  return Math.max(0, segmentNumber - 1) * segmentDurationSeconds
+}
+
+function segmentEndSeconds(segmentNumber: number, segmentDurationSeconds: number): number {
+  return segmentNumber * segmentDurationSeconds
+}
+
+function capDuration(endSeconds: number, durationSeconds: number | undefined): number {
+  return typeof durationSeconds === 'number'
+    ? Math.min(endSeconds, durationSeconds)
+    : endSeconds
+}
+
+function rangesFromSegmentNumbers(
+  segmentNumbers: Set<number>,
+  segmentDurationSeconds: number,
+  durationSeconds: number | undefined,
+): PlaybackTimelineRange[] {
+  return segmentNumberRanges(segmentNumbers).map((range) => ({
+    startSeconds: segmentStartSeconds(range.startSegmentNumber, segmentDurationSeconds),
+    endSeconds: capDuration(segmentEndSeconds(range.endSegmentNumber, segmentDurationSeconds), durationSeconds),
+  }))
+}
+
+function buildStitchedManifest(session: SessionRecord, segmentDurationSeconds: number): string {
+  const segmentRanges = segmentNumberRanges(session.timelineRuntime.generatedSegmentNumbers)
+  const firstRange = segmentRanges[0]
+  const isComplete = isTimelineComplete(
+    segmentRanges,
+    segmentDurationSeconds,
+    session.timelineRuntime.durationSeconds,
+  )
+  const lines = [
+    '#EXTM3U',
+    '#EXT-X-VERSION:3',
+    `#EXT-X-TARGETDURATION:${Math.ceil(segmentDurationSeconds)}`,
+    ...(isComplete ? ['#EXT-X-PLAYLIST-TYPE:VOD'] : []),
+    `#EXT-X-MEDIA-SEQUENCE:${firstRange?.startSegmentNumber ?? 1}`,
+  ]
+
+  segmentRanges.forEach((range, index) => {
+    if (index > 0) {
+      lines.push('#EXT-X-DISCONTINUITY')
+    }
+
+    for (let segmentNumber = range.startSegmentNumber; segmentNumber <= range.endSegmentNumber; segmentNumber += 1) {
+      lines.push(`#EXTINF:${segmentDurationSeconds},`, formatSegmentName(segmentNumber))
+    }
+  })
+
+  if (isComplete) {
+    lines.push('#EXT-X-ENDLIST')
+  }
+
+  lines.push('')
+  return lines.join('\n')
+}
+
+function isTimelineComplete(
+  ranges: Array<{ startSegmentNumber: number; endSegmentNumber: number }>,
+  segmentDurationSeconds: number,
+  durationSeconds: number | undefined,
+): boolean {
+  if (typeof durationSeconds !== 'number' || ranges.length !== 1) {
+    return false
+  }
+
+  const [range] = ranges
+  return range !== undefined
+    && range.startSegmentNumber === 1
+    && segmentEndSeconds(range.endSegmentNumber, segmentDurationSeconds) >= durationSeconds
+}
+
+function segmentNumberRanges(segmentNumbers: Set<number>): Array<{ startSegmentNumber: number; endSegmentNumber: number }> {
+  const sorted = [...segmentNumbers].sort((left, right) => left - right)
+  const ranges: Array<{ startSegmentNumber: number; endSegmentNumber: number }> = []
+
+  for (const segmentNumber of sorted) {
+    const lastRange = ranges.at(-1)
+    if (!lastRange || segmentNumber > lastRange.endSegmentNumber + 1) {
+      ranges.push({ startSegmentNumber: segmentNumber, endSegmentNumber: segmentNumber })
+      continue
+    }
+
+    lastRange.endSegmentNumber = segmentNumber
+  }
+
+  return ranges
+}
+
+function formatSegmentName(segmentNumber: number): string {
+  return `segment-${String(segmentNumber).padStart(6, '0')}.ts`
 }
 
 function getSegmentNames(manifest: string): string[] {

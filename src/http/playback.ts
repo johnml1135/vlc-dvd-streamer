@@ -119,6 +119,7 @@ export async function startPlaybackSession(
     discId: snapshot.disc.discId,
     drive: snapshot.disc.drive,
     titleNumber: request.titleNumber,
+    durationSeconds: title.durationSeconds,
     audioTrack: request.audioTrack ?? undefined,
     subtitleTrack: request.subtitleTrack ?? undefined,
   })

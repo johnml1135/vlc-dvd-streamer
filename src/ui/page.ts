@@ -42,6 +42,9 @@ export function renderHomePage(input: HomePageInput): string {
 export function renderPlayerPage(input: PlayerPageInput): string {
   const session = input.session
   const manifestUrl = input.manifestUrl ?? session.manifestUrl
+  const durationSeconds = session.timeline?.durationSeconds ?? session.durationSeconds ?? 0
+  const currentRange = session.timeline?.currentRange ?? { startSeconds: 0, endSeconds: 0 }
+  const stitchedManifestUrl = session.timeline?.stitchedManifestUrl ?? session.manifestUrl.replace(/index\.m3u8(?:\?.*)?$/, 'stitched.m3u8')
 
   return renderLayout({
     title: 'Now Playing',
@@ -55,8 +58,19 @@ export function renderPlayerPage(input: PlayerPageInput): string {
           <p class="meta-label">Manifest URL</p>
           <a class="manifest-link" href="${escapeHtml(manifestUrl)}">${escapeHtml(manifestUrl)}</a>
         </div>
-        <video id="player" controls playsinline muted data-manifest-url="${escapeHtml(manifestUrl)}"></video>
+        <video id="player" controls playsinline muted data-manifest-url="${escapeHtml(manifestUrl)}" data-session-id="${escapeHtml(session.id)}" data-duration-seconds="${durationSeconds}" data-epoch-start-seconds="${currentRange.startSeconds}"></video>
         <p id="player-status" class="player-status">Attaching HLS stream...</p>
+        <div class="title-timeline" data-stitched-manifest-url="${escapeHtml(stitchedManifestUrl)}">
+          <div class="title-timeline-row">
+            <label for="title-seek">Title position</label>
+            <span><span id="title-current-time">${escapeHtml(formatClock(currentRange.startSeconds))}</span> / <span id="title-duration">${escapeHtml(formatClock(durationSeconds))}</span></span>
+          </div>
+          <input id="title-seek" type="range" min="0" max="${Math.max(0, Math.floor(durationSeconds))}" step="1" value="${Math.max(0, Math.floor(currentRange.startSeconds))}" ${durationSeconds > 0 ? '' : 'disabled'} />
+          <div class="title-timeline-row title-timeline-foot">
+            <span id="title-buffered-summary">Cached through ${escapeHtml(formatClock(currentRange.endSeconds))}</span>
+            <a class="manifest-link" href="${escapeHtml(stitchedManifestUrl)}">Stitched cache</a>
+          </div>
+        </div>
         <div class="player-actions">
           <a class="ghost-link" href="/">Back to titles</a>
           <form method="post" action="/actions/sessions/${escapeHtml(session.id)}/stop">
@@ -68,6 +82,15 @@ export function renderPlayerPage(input: PlayerPageInput): string {
         const video = document.getElementById('player')
         const status = document.getElementById('player-status')
         const manifestUrl = video && video.dataset ? video.dataset.manifestUrl : undefined
+        const sessionId = video && video.dataset ? video.dataset.sessionId : undefined
+        const durationSeconds = video && video.dataset ? Number(video.dataset.durationSeconds || '0') : 0
+        const seekControl = document.getElementById('title-seek')
+        const titleCurrentTime = document.getElementById('title-current-time')
+        const bufferedSummary = document.getElementById('title-buffered-summary')
+        let epochStartSeconds = video && video.dataset ? Number(video.dataset.epochStartSeconds || '0') : 0
+        let activeHls = null
+        let nativeHlsActive = false
+        let playbackManifestUrl = manifestUrl
 
         function appendStreamFlag(url, key) {
           if (url.indexOf(key + '=1') !== -1) {
@@ -75,6 +98,138 @@ export function renderPlayerPage(input: PlayerPageInput): string {
           }
 
           return url + (url.includes('?') ? '&' : '?') + key + '=1'
+        }
+
+        function appendReloadToken(url) {
+          return url + (url.includes('?') ? '&' : '?') + 'reload=' + Date.now()
+        }
+
+        function formatClock(totalSeconds) {
+          const safeSeconds = Number.isFinite(totalSeconds) && totalSeconds > 0 ? Math.floor(totalSeconds) : 0
+          const hours = Math.floor(safeSeconds / 3600)
+          const minutes = Math.floor((safeSeconds % 3600) / 60)
+          const seconds = safeSeconds % 60
+          if (hours > 0) {
+            return hours + ':' + String(minutes).padStart(2, '0') + ':' + String(seconds).padStart(2, '0')
+          }
+
+          return minutes + ':' + String(seconds).padStart(2, '0')
+        }
+
+        function currentTitleSeconds() {
+          return epochStartSeconds + (video ? video.currentTime : 0)
+        }
+
+        function isTitleTimeBuffered(titleSeconds) {
+          if (!video || !Number.isFinite(titleSeconds)) {
+            return false
+          }
+
+          for (let index = 0; index < video.buffered.length; index += 1) {
+            const startSeconds = epochStartSeconds + video.buffered.start(index)
+            const endSeconds = epochStartSeconds + video.buffered.end(index)
+            if (titleSeconds >= startSeconds && titleSeconds <= endSeconds) {
+              return true
+            }
+          }
+
+          return false
+        }
+
+        function updateTimelineUi() {
+          if (titleCurrentTime) {
+            titleCurrentTime.textContent = formatClock(currentTitleSeconds())
+          }
+
+          if (seekControl && document.activeElement !== seekControl) {
+            seekControl.value = String(Math.min(durationSeconds || currentTitleSeconds(), currentTitleSeconds()))
+          }
+
+          if (bufferedSummary && video) {
+            const ranges = []
+            for (let index = 0; index < video.buffered.length; index += 1) {
+              ranges.push(formatClock(epochStartSeconds + video.buffered.start(index)) + '-' + formatClock(epochStartSeconds + video.buffered.end(index)))
+            }
+            bufferedSummary.textContent = ranges.length > 0
+              ? 'Buffered: ' + ranges.join(', ')
+              : 'Buffering current title range'
+          }
+        }
+
+        function applySessionTimeline(session) {
+          if (!session || !session.timeline) {
+            return
+          }
+
+          if (session.timeline.currentRange && typeof session.timeline.currentRange.startSeconds === 'number') {
+            epochStartSeconds = session.timeline.currentRange.startSeconds
+            if (video && video.dataset) {
+              video.dataset.epochStartSeconds = String(epochStartSeconds)
+            }
+          }
+        }
+
+        function seekWithinCurrentMedia(titleSeconds) {
+          if (!video) {
+            return
+          }
+
+          video.currentTime = Math.max(0, titleSeconds - epochStartSeconds)
+          updateTimelineUi()
+        }
+
+        function reloadPlaybackSource() {
+          if (!video || !playbackManifestUrl) {
+            return
+          }
+
+          const nextUrl = appendReloadToken(playbackManifestUrl)
+          if (activeHls && typeof activeHls.loadSource === 'function') {
+            activeHls.loadSource(nextUrl)
+            if (typeof activeHls.startLoad === 'function') {
+              activeHls.startLoad(0)
+            }
+            return
+          }
+
+          if (nativeHlsActive) {
+            video.src = nextUrl
+            video.load()
+          }
+        }
+
+        async function seekTitleTo(titleSeconds) {
+          if (!video || !status || !sessionId || !Number.isFinite(titleSeconds)) {
+            return
+          }
+
+          if (isTitleTimeBuffered(titleSeconds)) {
+            seekWithinCurrentMedia(titleSeconds)
+            status.textContent = 'Playing from the existing buffer.'
+            return
+          }
+
+          status.textContent = 'Seeking to ' + formatClock(titleSeconds) + ' and buffering from the DVD.'
+          const response = await fetch('/api/sessions/' + sessionId + '/seek', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ positionSeconds: titleSeconds }),
+          })
+          if (!response.ok) {
+            status.textContent = 'Could not seek to ' + formatClock(titleSeconds) + '.'
+            return
+          }
+
+          const result = await response.json()
+          applySessionTimeline(result.session)
+          if (result.action === 'already-available') {
+            seekWithinCurrentMedia(result.positionSeconds)
+            status.textContent = 'Playing from the current HLS window.'
+            return
+          }
+
+          reloadPlaybackSource()
+          status.textContent = 'Buffering from ' + formatClock(result.positionSeconds) + '.'
         }
 
         async function attachStream() {
@@ -88,7 +243,7 @@ export function renderPlayerPage(input: PlayerPageInput): string {
           const prefersNativeHls = video.canPlayType('application/vnd.apple.mpegurl')
             && /Safari\\//.test(userAgent)
             && !isChromiumBrowser
-          const playbackManifestUrl = isEmbeddedCodeBrowser
+          playbackManifestUrl = isEmbeddedCodeBrowser
             ? appendStreamFlag(manifestUrl, 'videoOnly')
             : manifestUrl
 
@@ -112,6 +267,7 @@ export function renderPlayerPage(input: PlayerPageInput): string {
                   },
                 },
               })
+              activeHls = hls
               let lastMediaRecoveryAt = 0
               hls.on(Hls.Events.ERROR, (_event, data) => {
                 if (!data || !status) {
@@ -147,7 +303,8 @@ export function renderPlayerPage(input: PlayerPageInput): string {
           }
 
           if (prefersNativeHls) {
-            video.src = manifestUrl
+            nativeHlsActive = true
+            video.src = playbackManifestUrl
             status.textContent = 'Using native HLS support.'
             return
           }
@@ -156,6 +313,20 @@ export function renderPlayerPage(input: PlayerPageInput): string {
         }
 
         void attachStream()
+        if (video) {
+          video.addEventListener('timeupdate', updateTimelineUi)
+          video.addEventListener('progress', updateTimelineUi)
+        }
+        if (seekControl) {
+          seekControl.addEventListener('input', () => {
+            if (titleCurrentTime) {
+              titleCurrentTime.textContent = formatClock(Number(seekControl.value))
+            }
+          })
+          seekControl.addEventListener('change', () => {
+            void seekTitleTo(Number(seekControl.value))
+          })
+        }
       </script>
     `,
   })
@@ -504,6 +675,32 @@ function renderLayout(input: {
         color: var(--muted);
       }
 
+      .title-timeline {
+        display: grid;
+        gap: 10px;
+        padding: 14px;
+        border-radius: 16px;
+        border: 1px solid var(--line);
+        background: rgba(255,255,255,0.54);
+      }
+
+      .title-timeline-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .title-timeline input[type="range"] {
+        width: 100%;
+      }
+
+      .title-timeline-foot {
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
       .log-drawer summary {
         cursor: pointer;
         font-weight: 700;
@@ -744,6 +941,19 @@ function formatDuration(totalSeconds: number): string {
   }
 
   return `${seconds}s`
+}
+
+function formatClock(totalSeconds: number): string {
+  const safeSeconds = Number.isFinite(totalSeconds) && totalSeconds > 0 ? Math.floor(totalSeconds) : 0
+  const hours = Math.floor(safeSeconds / 3600)
+  const minutes = Math.floor((safeSeconds % 3600) / 60)
+  const seconds = safeSeconds % 60
+
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+  }
+
+  return `${minutes}:${String(seconds).padStart(2, '0')}`
 }
 
 function escapeHtml(value: string): string {

@@ -41,6 +41,20 @@ export async function registerStreamRoutes(app: FastifyInstance, context: AppCon
 
     sessionManager.touch(sessionId)
 
+    if (asset === 'stitched.m3u8') {
+      const stitchedManifest = sessionManager.getStitchedManifest(sessionId)
+      if (!stitchedManifest) {
+        return sendApiError(reply, 404, 'Stream asset not found.')
+      }
+
+      const content = rewriteSessionManifest(stitchedManifest, {
+        queryFlag: videoOnly ? 'videoOnly' : undefined,
+        recoveryEpoch: session.recovery?.epoch,
+      })
+      reply.type('application/vnd.apple.mpegurl').send(content)
+      return
+    }
+
     try {
       const file = await readFile(`${session.outputDir}/${asset}`)
       if (asset.endsWith('.m3u8')) {

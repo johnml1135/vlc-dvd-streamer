@@ -73,6 +73,7 @@ describe('action routes', () => {
         discId: 'disc-001',
         drive: 'F:',
         titleNumber: 1,
+        durationSeconds: 7200,
         audioTrack: 1,
         subtitleTrack: 2,
       })

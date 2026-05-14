@@ -17,6 +17,14 @@ describe('renderPlayerPage', () => {
         manifestUrl: '/streams/session-123/index.m3u8',
         startedAt: '2025-01-01T00:00:00.000Z',
         lastAccessedAt: '2025-01-01T00:00:00.000Z',
+        durationSeconds: 7200,
+        timeline: {
+          durationSeconds: 7200,
+          currentRange: { startSeconds: 0, endSeconds: 8 },
+          generatedRanges: [{ startSeconds: 0, endSeconds: 8 }],
+          stitchedManifestUrl: '/streams/session-123/stitched.m3u8',
+          status: 'idle',
+        },
       },
       manifestUrl: '/streams/session-123/index.m3u8?videoOnly=1',
     })
@@ -41,6 +49,11 @@ describe('renderPlayerPage', () => {
     expect(html).toContain("localStorage.getItem(logDrawerStorageKey)")
     expect(html).toContain("logDrawer.addEventListener('toggle'")
     expect(html).toContain("window.addEventListener('beforeunload'")
+    expect(html).toContain('data-duration-seconds="7200"')
+    expect(html).toContain('id="title-seek"')
+    expect(html).toContain("fetch('/api/sessions/' + sessionId + '/seek'")
+    expect(html).toContain('isTitleTimeBuffered')
+    expect(html).toContain('stitched.m3u8')
   })
 })
 

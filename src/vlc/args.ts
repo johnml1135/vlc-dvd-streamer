@@ -84,7 +84,7 @@ export function buildHlsArgs(input: HlsArgsInput): string[] {
 
   args.push(
     buildDvdTitleMrl({ drive: input.drive, titleNumber: input.titleNumber }),
-    `--sout=#transcode{${transcodeOptions.join(',')}}:std{access=livehttp{seglen=2,delsegs=true,numsegs=4,index=${join(input.outputDir, 'index.m3u8')},index-url=${input.baseUrl}segment-######.ts},mux=ts{use-key-frames},dst=${join(input.outputDir, 'segment-######.ts')}}`,
+    `--sout=#transcode{${transcodeOptions.join(',')}}:std{access=livehttp{seglen=2,delsegs=false,numsegs=4,index=${join(input.outputDir, 'index.m3u8')},index-url=${input.baseUrl}segment-######.ts},mux=ts{use-key-frames},dst=${join(input.outputDir, 'segment-######.ts')}}`,
     'vlc://quit',
   )
 

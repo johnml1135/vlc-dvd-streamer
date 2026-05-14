@@ -104,6 +104,10 @@ Helpful UI details:
 - `Open player` returns to the active session if you already started one.
 - `Stop Stream` ends the current VLC-backed session.
 - `Back to titles` returns to the thumbnail grid without closing the server.
+- The player shows the full title duration from the DVD catalog even while HLS is still being generated.
+- Seeking inside the browser's current buffered range stays local and does not restart VLC.
+- Seeking to an unloaded title time asks the server to restart VLC at that DVD time and buffer a new HLS window.
+- Generated segment files are retained for the active session and exposed through `stitched.m3u8`, so ranges produced before and after jumps can be stitched together as the title cache fills in.
 
 If VLC stops producing new HLS segments during playback, the server treats that as a possible unreadable DVD area instead of waiting indefinitely. It stops the stalled VLC process, restarts the same title about 10 seconds farther ahead, serves the next HLS manifest with discontinuity markers, and shows a short recovery status on the player page. The browser should only see a coherent stream resume after the skipped range.
 
