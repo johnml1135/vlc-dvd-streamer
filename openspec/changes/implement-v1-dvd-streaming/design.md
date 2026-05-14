@@ -113,7 +113,7 @@ This matches the intended one-user appliance shape and avoids extra UX around co
 
 The VLC worker writes a manifest and MPEG-TS segments into a session directory. The server waits for `index.m3u8` and the first segment before returning a ready session. The browser receives only app server URLs such as `/streams/:sessionId/index.m3u8`.
 
-The app should prefer reliable startup and cleanup over low latency. A few seconds of startup delay is acceptable.
+The app should prefer reliable startup and cleanup over low latency. Real commercial discs can take one to two minutes before VLC writes a usable HLS manifest and first segment, so readiness waits must be generous, file-based, and paired with cleanup of failed startup attempts. A session is not ready until the manifest is parseable and the first referenced MPEG-TS segment is present enough to look like a transport stream.
 
 ### Decision: Make automated tests own the process boundary
 

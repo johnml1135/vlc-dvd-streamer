@@ -17,7 +17,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
 
   return {
     host: env.HOST ?? '127.0.0.1',
-    port: Number(env.PORT ?? 3000),
+    port: parsePositiveIntegerEnv(env.PORT, 'PORT', 3000, 65535),
     cacheDir: env.CACHE_DIR ?? '.cache',
     vlcCandidates: [
       configuredVlcPath,
@@ -25,11 +25,24 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
       'C:/Program Files (x86)/VideoLAN/VLC/vlc.exe',
     ].filter((value): value is string => Boolean(value)),
     drive: env.DVD_DRIVE ?? 'D:',
-    minVisibleTitleDurationSeconds: Number(env.MIN_VISIBLE_TITLE_SECONDS ?? 300),
-    inactiveSessionMs: Number(env.INACTIVE_SESSION_MS ?? 900000),
-    vlcTimeoutMs: Number(env.VLC_TIMEOUT_MS ?? 30000),
-    sessionReadinessTimeoutMs: Number(env.SESSION_READINESS_TIMEOUT_MS ?? 120000),
+    minVisibleTitleDurationSeconds: parsePositiveIntegerEnv(env.MIN_VISIBLE_TITLE_SECONDS, 'MIN_VISIBLE_TITLE_SECONDS', 300),
+    inactiveSessionMs: parsePositiveIntegerEnv(env.INACTIVE_SESSION_MS, 'INACTIVE_SESSION_MS', 900000),
+    vlcTimeoutMs: parsePositiveIntegerEnv(env.VLC_TIMEOUT_MS, 'VLC_TIMEOUT_MS', 30000),
+    sessionReadinessTimeoutMs: parsePositiveIntegerEnv(env.SESSION_READINESS_TIMEOUT_MS, 'SESSION_READINESS_TIMEOUT_MS', 120000),
     vlcShimScript: env.VLC_SHIM_SCRIPT,
     vlcTrackMetadataScript: env.VLC_TRACK_METADATA_SCRIPT,
   }
+}
+
+function parsePositiveIntegerEnv(value: string | undefined, name: string, defaultValue: number, maxValue = Number.MAX_SAFE_INTEGER): number {
+  if (value === undefined || value === '') {
+    return defaultValue
+  }
+
+  const parsed = Number(value)
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > maxValue) {
+    throw new Error(`${name} must be an integer between 1 and ${maxValue}; got "${value}".`)
+  }
+
+  return parsed
 }

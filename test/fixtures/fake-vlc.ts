@@ -71,12 +71,12 @@ if (mode === 'scan') {
 
 if (mode === 'hls') {
   await writeFile(join(outDir, 'index.m3u8'), '#EXTM3U\n#EXTINF:2,\nsegment-000.ts\n', 'utf8')
-  await writeFile(join(outDir, 'segment-000.ts'), 'FAKE_TS_SEGMENT', 'utf8')
+  await writeFile(join(outDir, 'segment-000.ts'), Buffer.from([0x47, 0x40, 0x00, 0x10]))
 }
 
 if (mode === 'hls-server') {
   await writeFile(join(outDir, 'index.m3u8'), '#EXTM3U\n#EXTINF:2,\nsegment-000001.ts\n', 'utf8')
-  await writeFile(join(outDir, 'segment-000001.ts'), 'FAKE_TS_SEGMENT', 'utf8')
+  await writeFile(join(outDir, 'segment-000001.ts'), Buffer.from([0x47, 0x40, 0x00, 0x10]))
   console.log('FAKE_VLC_READY')
   process.on('SIGTERM', () => process.exit(0))
   process.on('SIGINT', () => process.exit(0))

@@ -18,11 +18,11 @@ describe('fake VLC integration', () => {
 
     const result = await runManagedProcess(spec)
     const manifest = await readFile(join(outDir, 'index.m3u8'), 'utf8')
-    const segment = await readFile(join(outDir, 'segment-000.ts'), 'utf8')
+    const segment = await readFile(join(outDir, 'segment-000.ts'))
 
     expect(result.ok).toBe(true)
     expect(result.stdout).toContain('FAKE_VLC_DONE')
     expect(manifest).toContain('#EXTM3U')
-    expect(segment).toContain('FAKE_TS_SEGMENT')
+    expect(segment[0]).toBe(0x47)
   })
 })

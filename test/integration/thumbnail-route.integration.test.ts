@@ -53,12 +53,16 @@ describe('thumbnail route', () => {
       },
     })
 
-    const response = await app.inject({
-      method: 'GET',
-      url: '/api/discs/current/titles/1/thumbnail.jpg',
-    })
+    try {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/api/discs/current/titles/1/thumbnail.jpg',
+      })
 
-    expect(response.statusCode).toBe(200)
-    expect(response.body).toBe('REAL_THUMB')
+      expect(response.statusCode).toBe(200)
+      expect(response.body).toBe('REAL_THUMB')
+    } finally {
+      await app.close()
+    }
   })
 })

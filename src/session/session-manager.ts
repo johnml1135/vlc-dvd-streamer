@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { access, mkdir, readdir, rm } from 'node:fs/promises'
-import { constants } from 'node:fs'
+import { access, mkdir, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ManagedProcessHandle } from '../vlc/process-supervisor.js'
 import type { VlcWorker } from '../vlc/worker.js'
@@ -127,6 +126,7 @@ export class SessionManager {
       this.options.logger?.info('session', `Session ${session.id} is ready.`)
       return this.toPlaybackSession(session)
     } catch (error) {
+      await this.cleanupFailedStartup(session)
       session.state = 'failed'
       session.error = {
         message: 'Playback session failed to become ready.',
@@ -198,17 +198,36 @@ export class SessionManager {
       }
     }
 
-    await session.handle.stop()
     throw new Error('Timed out waiting for HLS manifest and first segment.')
   }
 
   private async hasReadyFiles(outputDir: string, manifestPath: string): Promise<boolean> {
     try {
-      await access(manifestPath, constants.F_OK)
-      const files = await readdir(outputDir)
-      return files.some((file) => file.endsWith('.ts'))
+      await access(manifestPath)
+      const manifest = await readFile(manifestPath, 'utf8')
+      const segmentName = getFirstSegmentName(manifest)
+      if (!segmentName) {
+        return false
+      }
+
+      const segment = await readFile(join(outputDir, segmentName))
+      return segment.length > 0 && segment[0] === 0x47
     } catch {
       return false
+    }
+  }
+
+  private async cleanupFailedStartup(session: SessionRecord): Promise<void> {
+    try {
+      await session.handle.stop()
+    } catch (error) {
+      this.options.logger?.warn('session', `Failed to stop session ${session.id} after startup failure: ${formatError(error)}`)
+    }
+
+    try {
+      await rm(session.outputDir, { force: true, recursive: true })
+    } catch (error) {
+      this.options.logger?.warn('session', `Failed to remove session ${session.id} output after startup failure: ${formatError(error)}`)
     }
   }
 
@@ -241,4 +260,27 @@ export class SessionManager {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function getFirstSegmentName(manifest: string): string | null {
+  if (!manifest.trimStart().startsWith('#EXTM3U')) {
+    return null
+  }
+
+  const segmentLine = manifest
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line && !line.startsWith('#'))
+
+  if (!segmentLine) {
+    return null
+  }
+
+  const withoutQuery = segmentLine.split('?')[0]
+  const segmentName = withoutQuery.split('/').filter(Boolean).at(-1)
+  return segmentName?.endsWith('.ts') ? segmentName : null
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }

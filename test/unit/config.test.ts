@@ -17,4 +17,10 @@ describe('loadConfig', () => {
 
     expect(config.sessionReadinessTimeoutMs).toBe(150000)
   })
+
+  it('rejects invalid numeric environment values', () => {
+    expect(() => loadConfig({ PORT: 'abc' })).toThrow(/PORT/i)
+    expect(() => loadConfig({ VLC_TIMEOUT_MS: '-1000' })).toThrow(/VLC_TIMEOUT_MS/i)
+    expect(() => loadConfig({ SESSION_READINESS_TIMEOUT_MS: '12.5' })).toThrow(/SESSION_READINESS_TIMEOUT_MS/i)
+  })
 })

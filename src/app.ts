@@ -55,7 +55,9 @@ export async function buildApp(deps: AppDeps) {
   await app.register(websocket)
 
   app.addHook('onClose', async () => {
-    await services.sessionManager?.stopAll()
+    if (typeof services.sessionManager?.stopAll === 'function') {
+      await services.sessionManager.stopAll()
+    }
   })
 
   app.get('/ws', { websocket: true }, (socket) => {
@@ -152,19 +154,26 @@ export async function buildApp(deps: AppDeps) {
       return sendApiError(reply, 503, 'Playback services are not configured.')
     }
 
-    const body = request.body as Record<string, string | undefined>
-    const discId = String(body.discId ?? '')
-    const titleNumber = Number(body.titleNumber)
-    const audioTrack = parseOptionalNumber(body.audioTrack)
-    const subtitleTrack = parseOptionalNumber(body.subtitleTrack)
+    const playbackRequest = parsePlaybackRequest(request.body)
+    if (!playbackRequest.ok) {
+      return sendApiError(reply, 400, playbackRequest.message)
+    }
+
+    const { discId, titleNumber, audioTrack, subtitleTrack } = playbackRequest
     const snapshot = catalogService.getSnapshot()
 
     if (snapshot.state !== 'catalog_ready' || snapshot.disc?.discId !== discId) {
       return sendApiError(reply, 400, 'The selected disc is no longer current.')
     }
 
-    if (!catalogService.findTitle(titleNumber)) {
+    const title = catalogService.findTitle(titleNumber)
+    if (!title) {
       return sendApiError(reply, 400, 'The selected title is not available.')
+    }
+
+    const trackValidation = validatePlaybackTracks(title, audioTrack, subtitleTrack)
+    if (!trackValidation.ok) {
+      return sendApiError(reply, 400, trackValidation.message)
     }
 
     const session = await sessionManager.start({
@@ -295,33 +304,38 @@ export async function buildApp(deps: AppDeps) {
       return sendApiError(reply, 503, 'Playback services are not configured.')
     }
 
-    const body = request.body as {
-      discId?: string
-      titleNumber?: number
-      audioTrack?: number
-      subtitleTrack?: number
+    const playbackRequest = parsePlaybackRequest(request.body)
+    if (!playbackRequest.ok) {
+      return sendApiError(reply, 400, playbackRequest.message)
     }
+
+    const { discId, titleNumber, audioTrack, subtitleTrack } = playbackRequest
     const snapshot = catalogService.getSnapshot()
 
     if (snapshot.state !== 'catalog_ready' || !snapshot.disc) {
       return sendApiError(reply, 409, 'No DVD catalog is ready yet.')
     }
 
-    if (body.discId !== snapshot.disc.discId) {
+    if (discId !== snapshot.disc.discId) {
       return sendApiError(reply, 400, 'The selected disc is no longer current.')
     }
 
-    const titleNumber = Number(body.titleNumber)
-    if (!catalogService.findTitle(titleNumber)) {
+    const title = catalogService.findTitle(titleNumber)
+    if (!title) {
       return sendApiError(reply, 400, 'The selected title is not available.')
+    }
+
+    const trackValidation = validatePlaybackTracks(title, audioTrack, subtitleTrack)
+    if (!trackValidation.ok) {
+      return sendApiError(reply, 400, trackValidation.message)
     }
 
     const session = await sessionManager.start({
       discId: snapshot.disc.discId,
       drive: snapshot.disc.drive,
       titleNumber,
-      audioTrack: typeof body.audioTrack === 'number' ? body.audioTrack : undefined,
-      subtitleTrack: typeof body.subtitleTrack === 'number' ? body.subtitleTrack : undefined,
+      audioTrack: audioTrack ?? undefined,
+      subtitleTrack: subtitleTrack ?? undefined,
     })
 
     if (session.state !== 'ready') {
@@ -425,13 +439,98 @@ function rewriteManifest(manifest: string, key: string): string {
     .join('\n')
 }
 
-function parseOptionalNumber(value: string | undefined): number | null {
-  if (!value) {
+type PlaybackRequestResult = {
+  ok: true
+  discId: string
+  titleNumber: number
+  audioTrack: number | null
+  subtitleTrack: number | null
+} | {
+  ok: false
+  message: string
+}
+
+function parsePlaybackRequest(body: unknown): PlaybackRequestResult {
+  const record = asRecord(body)
+  if (!record) {
+    return { ok: false, message: 'Playback request body is invalid.' }
+  }
+
+  const discId = typeof record.discId === 'string' ? record.discId : ''
+  if (!discId) {
+    return { ok: false, message: 'Disc id is required.' }
+  }
+
+  const titleNumber = parsePositiveInteger(record.titleNumber)
+  if (titleNumber === null) {
+    return { ok: false, message: 'Title number must be a positive integer.' }
+  }
+
+  const audioTrack = parseOptionalNonNegativeInteger(record.audioTrack)
+  if (audioTrack === undefined) {
+    return { ok: false, message: 'Audio track must be a non-negative integer.' }
+  }
+
+  const subtitleTrack = parseOptionalNonNegativeInteger(record.subtitleTrack)
+  if (subtitleTrack === undefined) {
+    return { ok: false, message: 'Subtitle track must be a non-negative integer.' }
+  }
+
+  return {
+    ok: true,
+    discId,
+    titleNumber,
+    audioTrack,
+    subtitleTrack,
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function parsePositiveInteger(value: unknown): number | null {
+  if (typeof value !== 'number' && typeof value !== 'string') {
+    return null
+  }
+
+  if (typeof value === 'string' && value.trim() === '') {
     return null
   }
 
   const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed : null
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null
+}
+
+function parseOptionalNonNegativeInteger(value: unknown): number | null | undefined {
+  if (value === undefined || value === null || value === '') {
+    return null
+  }
+
+  if (typeof value !== 'number' && typeof value !== 'string') {
+    return undefined
+  }
+
+  if (typeof value === 'string' && value.trim() === '') {
+    return null
+  }
+
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined
+}
+
+function validatePlaybackTracks(title: DiscTitle, audioTrack: number | null, subtitleTrack: number | null): { ok: true } | { ok: false; message: string } {
+  if (audioTrack !== null && !title.audioTracks.some((track) => track.id === audioTrack)) {
+    return { ok: false, message: 'The selected audio track is not available for this title.' }
+  }
+
+  if (subtitleTrack !== null && !title.subtitleTracks.some((track) => track.id === subtitleTrack)) {
+    return { ok: false, message: 'The selected subtitle track is not available for this title.' }
+  }
+
+  return { ok: true }
 }
 
 function isValidSessionId(sessionId: string): boolean {

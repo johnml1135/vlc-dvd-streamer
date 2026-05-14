@@ -13,8 +13,12 @@ describe('buildApp', () => {
       services: {},
     })
 
-    const response = await app.inject({ method: 'GET', url: '/api/health' })
+    try {
+      const response = await app.inject({ method: 'GET', url: '/api/health' })
 
-    expect(response.statusCode).toBe(200)
+      expect(response.statusCode).toBe(200)
+    } finally {
+      await app.close()
+    }
   })
 })
