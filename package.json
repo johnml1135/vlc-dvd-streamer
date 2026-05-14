@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "start": "tsx src/server.ts",
+    "start": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/windows/start.ps1",
+    "start:foreground": "tsx src/server.ts",
+    "stop": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/windows/stop.ps1",
     "build": "tsc -p tsconfig.json",
     "install:windows": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/windows/install.ps1",
     "typecheck": "tsc -p tsconfig.json --noEmit",

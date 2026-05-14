@@ -4,10 +4,90 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { buildApp } from '../../src/app.js'
 import { CatalogService } from '../../src/disc/catalog-service.js'
+import type { CatalogSnapshot } from '../../src/disc/types.js'
 import { SessionManager } from '../../src/session/session-manager.js'
 import { VlcWorker } from '../../src/vlc/worker.js'
 
 describe('app API', () => {
+  it('renders the home page immediately while the catalog refresh continues in the background', async () => {
+    const cacheDir = await mkdtemp(join(tmpdir(), 'vlc-dvd-streamer-api-home-'))
+    let startRefreshCalls = 0
+    let refreshCalls = 0
+    let snapshot: CatalogSnapshot = {
+      state: 'empty',
+      disc: null,
+    }
+
+    const refreshPromise = new Promise<CatalogSnapshot>((resolve) => {
+      setTimeout(() => {
+        snapshot = {
+          state: 'catalog_ready',
+          disc: {
+            discId: 'fake-disc-001',
+            drive: 'D:',
+            titles: [],
+          },
+        }
+        resolve(snapshot)
+      }, 300)
+    })
+
+    const app = await buildApp({
+      config: {
+        host: '127.0.0.1',
+        port: 3000,
+        cacheDir,
+        vlcCandidates: [process.execPath],
+      },
+      services: {
+        catalogService: {
+          getSnapshot() {
+            return snapshot
+          },
+          startRefresh() {
+            startRefreshCalls += 1
+            snapshot = {
+              state: 'catalog_loading',
+              disc: null,
+              progress: {
+                scannedTitles: 1,
+                totalTitles: 4,
+                currentTitleNumber: 2,
+              },
+            }
+            void refreshPromise
+          },
+          async refresh() {
+            refreshCalls += 1
+            return refreshPromise
+          },
+          listTitles() {
+            return []
+          },
+          findTitle() {
+            return undefined
+          },
+        },
+        sessionManager: {
+          getActiveSession() {
+            return undefined
+          },
+        },
+      },
+    })
+
+    const startedAt = Date.now()
+    const response = await app.inject({ method: 'GET', url: '/' })
+    const elapsedMs = Date.now() - startedAt
+
+    expect(response.statusCode).toBe(200)
+    expect(response.body).toContain('Reading titles from the disc.')
+    expect(response.body).toContain('1 of 4 titles scanned')
+    expect(startRefreshCalls).toBe(1)
+    expect(refreshCalls).toBe(0)
+    expect(elapsedMs).toBeLessThan(200)
+  })
+
   it('refreshes the disc, lists titles, starts a stream, serves the manifest, and stops the session', async () => {
     const cacheDir = await mkdtemp(join(tmpdir(), 'vlc-dvd-streamer-api-'))
     const worker = new VlcWorker({

@@ -19,6 +19,7 @@
 - [ ] 3.3 Implement VLC thumbnail command execution with output detection, retry timestamps, and placeholder fallback.
 - [x] 3.4 Implement VLC HLS command execution with manifest/first-segment readiness detection and failure reporting.
 - [x] 3.5 Enforce the VLC-only boundary in code organization so catalog, thumbnail, and streaming modules cannot use non-VLC DVD sidecars.
+- [ ] 3.6 Implement the runtime libVLC metadata-enrichment path for language-bearing DVD audio/subtitle labels and keep VLC HTTP diagnostics-only.
 
 ## 4. Disc Catalog
 
@@ -27,6 +28,7 @@
 - [x] 4.3 Implement VLC-derived title metadata scanning and normalize titles into the catalog shape.
 - [x] 4.4 Implement short-title filtering, `includeShort=true`, and likely-main-feature inference.
 - [x] 4.5 Implement thumbnail cache and endpoint behavior through the VLC thumbnail worker.
+- [ ] 4.6 Merge runtime libVLC track labels into catalog titles and fall back to generic labels only when enrichment is unavailable.
 
 ## 5. Streaming Sessions
 

@@ -53,6 +53,7 @@ describe('buildHlsArgs', () => {
 
     expect(args).toContain('--intf')
     expect(args).toContain('dummy')
+    expect(args).toContain('--no-dvdnav-menu')
     expect(args).toContain('--audio-track=0')
     expect(args).toContain('--sub-track=2')
     expect(args).toContain('dvd:///D:/#4')

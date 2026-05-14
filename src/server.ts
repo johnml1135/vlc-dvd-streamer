@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { buildApp } from './app.js'
 import { loadConfig } from './config.js'
@@ -35,11 +36,19 @@ serverLog.info(
     ? `Resolved VLC executable: ${resolvedVlc.path}`
     : `VLC executable was not found. Tried: ${config.vlcCandidates.join(', ')}`,
 )
+
+const defaultTrackMetadataScript = !config.vlcShimScript
+  && process.platform === 'win32'
+  && existsSync(config.vlcTrackMetadataScript ?? 'scripts/windows/query-vlc-track-descriptions.ps1')
+  ? (config.vlcTrackMetadataScript ?? 'scripts/windows/query-vlc-track-descriptions.ps1')
+  : undefined
+
 const worker = new VlcWorker({
   executable: resolvedVlc.path ?? config.vlcCandidates[0] ?? process.execPath,
   drive: config.drive ?? 'D:',
   timeoutMs: config.vlcTimeoutMs ?? 30000,
   shimScript: config.vlcShimScript,
+  trackMetadataScript: defaultTrackMetadataScript,
   logger: serverLog,
 })
 const catalogService = new CatalogService({
@@ -48,10 +57,15 @@ const catalogService = new CatalogService({
   minVisibleTitleDurationSeconds: config.minVisibleTitleDurationSeconds ?? 300,
   worker,
   logger: serverLog,
+  onSnapshot: (snapshot) => {
+    eventHub.publish({ type: 'disc.updated', payload: snapshot })
+    eventHub.publish({ type: 'catalog.updated', payload: snapshot })
+  },
 })
 const sessionManager = new SessionManager({
   cacheDir: config.cacheDir,
   inactivityMs: config.inactiveSessionMs ?? 900000,
+  readinessTimeoutMs: config.sessionReadinessTimeoutMs ?? 120000,
   worker,
   logger: serverLog,
 })

@@ -196,6 +196,20 @@ function renderCatalog(input: HomePageInput): string {
 }
 
 function renderWaiting(input: HomePageInput): string {
+  const loadingDetail = (() => {
+    const progress = input.snapshot.progress
+    if (!progress || progress.totalTitles === null) {
+      return 'The catalog is still being generated.'
+    }
+
+    const progressLabel = `${progress.scannedTitles} of ${progress.totalTitles} titles scanned`
+    if (progress.currentTitleNumber !== null) {
+      return `${progressLabel}. Reading title ${progress.currentTitleNumber}.`
+    }
+
+    return `${progressLabel}. Finalizing the catalog.`
+  })()
+
   const messageByState: Record<string, { title: string; detail: string }> = {
     empty: {
       title: 'Insert a DVD to begin.',
@@ -211,7 +225,7 @@ function renderWaiting(input: HomePageInput): string {
     },
     catalog_loading: {
       title: 'Reading titles from the disc.',
-      detail: 'The catalog is still being generated.',
+      detail: loadingDetail,
     },
     disc_removed: {
       title: 'The disc was removed.',
@@ -601,7 +615,7 @@ function renderLayout(input: {
 
             if (event.type === 'catalog.updated' && window.location.pathname === '/') {
               const payload = event.payload
-              if (payload && typeof payload.state === 'string' && payload.state !== 'catalog_loading' && payload.state !== 'disc_detected') {
+              if (payload && typeof payload.state === 'string' && payload.state !== 'empty' && payload.state !== 'no_drive') {
                 window.location.reload()
               }
             }

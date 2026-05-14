@@ -75,4 +75,32 @@ describe('renderHomePage', () => {
     expect(html).toContain('<option value="">Off</option>')
     expect(html).toContain('<option value="2">English SDH</option>')
   })
+
+  it('shows per-title scan progress while the catalog is loading', () => {
+    const html = renderHomePage({
+      health: {
+        ok: true,
+        dependencies: {
+          vlc: {
+            found: true,
+            path: 'C:/Program Files/VideoLAN/VLC/vlc.exe',
+          },
+        },
+      },
+      snapshot: {
+        state: 'catalog_loading',
+        disc: null,
+        progress: {
+          scannedTitles: 1,
+          totalTitles: 4,
+          currentTitleNumber: 2,
+        },
+      },
+      titles: [],
+      includeShort: true,
+    })
+
+    expect(html).toContain('1 of 4 titles scanned')
+    expect(html).toContain('Reading title 2')
+  })
 })

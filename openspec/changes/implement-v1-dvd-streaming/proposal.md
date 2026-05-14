@@ -7,6 +7,7 @@ The repository has strong planning notes but no executable implementation contra
 - Create the v1 VLC DVD streaming app as a personal, local-network web app for one DVD drive, one active player, and one viewer at a time.
 - Use Fastify + TypeScript for the Node.js server, API routes, WebSocket updates, static frontend hosting, stream file serving, configuration, and lifecycle ownership.
 - Use VLC as the only DVD access, probing, thumbnail, and streaming engine. No FFmpeg sidecar, MakeMKV scanner, direct VOB reader, or alternate non-VLC DVD path is part of v1.
+- Document the VLC control model as a split worker strategy: direct CLI process ownership for preflight, probing, thumbnails, and HLS, playback-time libVLC APIs for language-bearing track-label enrichment, and localhost-only VLC HTTP for diagnostics.
 - Treat the DVD as a list of playable titles, not as an interactive menu tree.
 - Generate temporary HLS files with VLC and play them in a browser through native HLS where available or hls.js where Media Source Extensions are available.
 - Replace the prior concurrency model with a personal-use policy: starting a different title stops the existing VLC session and starts the requested one.

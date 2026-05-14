@@ -24,6 +24,7 @@ The system SHALL route all DVD media access through a VLC worker abstraction.
 #### Scenario: Component needs title metadata
 - **WHEN** the catalog service needs title metadata
 - **THEN** it SHALL request metadata through the VLC worker boundary.
+- **AND** the worker MAY combine CLI probe results with playback-time libVLC enrichment before returning normalized metadata.
 
 #### Scenario: Component needs video output
 - **WHEN** the thumbnail service or session manager needs decoded DVD video
@@ -33,6 +34,25 @@ The system SHALL route all DVD media access through a VLC worker abstraction.
 - **WHEN** implementation work needs more metadata or a different media pipeline
 - **THEN** v1 SHALL use an alternate VLC command shape or expose an unsupported limitation
 - **AND** it SHALL NOT add FFmpeg, MakeMKV, direct VOB parsing, or another sidecar DVD reader.
+
+### Requirement: VLC control surface selection
+The system SHALL use the stable public VLC control surface that matches the current operation, while keeping that choice hidden behind the VLC worker boundary.
+
+#### Scenario: Deterministic process-owned work is started
+- **WHEN** the worker performs preflight, title-number probing, duration probing, thumbnail capture, or HLS transcoding
+- **THEN** it SHALL spawn the VLC executable directly with an argv array
+- **AND** it SHALL own process timeouts, logs, and shutdown without shell wrappers.
+
+#### Scenario: Language-bearing track labels are needed
+- **WHEN** the catalog service needs audio or subtitle language labels that are not present in CLI probe output
+- **THEN** the worker SHALL use playback-time libVLC media-player APIs for that title
+- **AND** it SHALL wait for `MediaPlayerESAdded` or `MediaPlayerESSelected` before reading track descriptions or media tracks
+- **AND** it SHALL NOT rely on `libvlc_media_parse_with_options()` alone for `dvd:///` metadata on VLC 3.x.
+
+#### Scenario: Manual diagnostics need live player control
+- **WHEN** an operator needs status, seek, pause, or similar live inspection for debugging
+- **THEN** the system MAY expose VLC's Lua HTTP interface only on localhost
+- **AND** it SHALL NOT make that HTTP surface the normal app control plane.
 
 ### Requirement: DVD title MRL construction
 The system SHALL construct DVD title inputs through a tested MRL builder.

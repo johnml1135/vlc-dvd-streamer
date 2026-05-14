@@ -81,7 +81,8 @@ export async function buildApp(deps: AppDeps) {
     if (catalogService) {
       snapshot = catalogService.getSnapshot()
       if (snapshot.state === 'empty') {
-        snapshot = await catalogService.refresh()
+        catalogService.startRefresh()
+        snapshot = catalogService.getSnapshot()
       }
 
       if (snapshot.state === 'catalog_ready') {
@@ -140,9 +141,7 @@ export async function buildApp(deps: AppDeps) {
       return sendApiError(reply, 503, 'Catalog service is not configured.')
     }
 
-    const snapshot = await catalogService.refresh()
-    eventHub.publish({ type: 'disc.updated', payload: snapshot })
-    eventHub.publish({ type: 'catalog.updated', payload: snapshot })
+    catalogService.startRefresh()
     reply.redirect('/')
   })
 

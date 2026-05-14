@@ -37,6 +37,12 @@ npm run build
 npm start
 ```
 
+`npm start` now launches the server in the background, prints the PID, and writes manual-run logs to `.runtime\logs\manual-server.stdout.log` and `.runtime\logs\manual-server.stderr.log`.
+
+Use `npm stop` to stop that background server again.
+
+If you want the server attached to the current terminal instead, use `npm run start:foreground`.
+
 Then open `http://127.0.0.1:3000` on the host PC.
 
 If you want other machines on your LAN to reach it during a manual run, bind to every interface:
@@ -90,6 +96,8 @@ Once the installer is in place:
 6. Press `Start Stream`.
 7. Use the browser's maximize or full-screen control on the player page if you want a larger view.
 
+On some commercial discs, `Start Stream` can take around one to two minutes before the player page opens while VLC negotiates disc access and writes the first HLS segments.
+
 Helpful UI details:
 
 - `Show extras` reveals the shorter bonus titles that are hidden by default.
@@ -117,8 +125,11 @@ If another machine cannot connect, check these first:
 
 The Windows install path writes runtime files here:
 
+- `.runtime\manual-server.json`
 - `.runtime\installed-settings.json`
 - `.runtime\disc-state.txt`
+- `.runtime\logs\manual-server.stdout.log`
+- `.runtime\logs\manual-server.stderr.log`
 - `.runtime\logs\background-host.log`
 - `.runtime\logs\server.stdout.log`
 - `.runtime\logs\server.stderr.log`

@@ -7,7 +7,9 @@ export interface AppConfig {
   minVisibleTitleDurationSeconds?: number
   inactiveSessionMs?: number
   vlcTimeoutMs?: number
+  sessionReadinessTimeoutMs?: number
   vlcShimScript?: string
+  vlcTrackMetadataScript?: string
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
@@ -26,6 +28,8 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     minVisibleTitleDurationSeconds: Number(env.MIN_VISIBLE_TITLE_SECONDS ?? 300),
     inactiveSessionMs: Number(env.INACTIVE_SESSION_MS ?? 900000),
     vlcTimeoutMs: Number(env.VLC_TIMEOUT_MS ?? 30000),
+    sessionReadinessTimeoutMs: Number(env.SESSION_READINESS_TIMEOUT_MS ?? 120000),
     vlcShimScript: env.VLC_SHIM_SCRIPT,
+    vlcTrackMetadataScript: env.VLC_TRACK_METADATA_SCRIPT,
   }
 }

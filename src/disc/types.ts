@@ -29,9 +29,16 @@ export interface DiscSummary {
   titles: DiscTitle[]
 }
 
+export interface CatalogProgress {
+  scannedTitles: number
+  totalTitles: number | null
+  currentTitleNumber: number | null
+}
+
 export interface CatalogSnapshot {
   state: DiscState
   disc: DiscSummary | null
+  progress?: CatalogProgress
   error?: {
     message: string
     detail?: string

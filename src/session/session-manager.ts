@@ -180,7 +180,7 @@ export class SessionManager {
   }
 
   private async waitForReadiness(session: SessionRecord): Promise<void> {
-    const deadline = Date.now() + (this.options.readinessTimeoutMs ?? 15000)
+    const deadline = Date.now() + (this.options.readinessTimeoutMs ?? 120000)
 
     while (Date.now() < deadline) {
       if (await this.hasReadyFiles(session.outputDir, session.manifestPath)) {

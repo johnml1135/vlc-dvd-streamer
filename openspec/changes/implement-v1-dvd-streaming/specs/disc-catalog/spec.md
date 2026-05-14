@@ -31,8 +31,13 @@ The system SHALL build the visible DVD title catalog from VLC-derived informatio
 - **THEN** the system SHALL normalize each playable title into an id, title number, label, duration, likely-main-feature flag, thumbnail URL, audio options, and subtitle options.
 - **AND** the catalog SHALL include the current `discId`.
 
+#### Scenario: Runtime label enrichment is available
+- **WHEN** the base VLC probe finds track ids or counts but not language-bearing labels
+- **THEN** the system SHALL perform a playback-time libVLC enrichment pass for that title through the VLC worker
+- **AND** merge any discovered audio or subtitle language or description labels into the normalized catalog.
+
 #### Scenario: VLC metadata is incomplete
-- **WHEN** VLC cannot provide language or track labels
+- **WHEN** playback-time VLC enrichment still cannot provide language or track labels
 - **THEN** the system SHALL use explicit fallback labels such as `Audio 1` or `Subtitle 1`
 - **AND** the UI SHALL not imply that unknown metadata is known.
 

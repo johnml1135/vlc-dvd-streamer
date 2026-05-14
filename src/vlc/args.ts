@@ -43,6 +43,7 @@ export function buildHlsArgs(input: HlsArgsInput): string[] {
     '--intf',
     'dummy',
     '--no-video-title-show',
+    '--no-dvdnav-menu',
     '--deinterlace',
     '--no-sout-all',
     '--sout-x264-preset=veryfast',

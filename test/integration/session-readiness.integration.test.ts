@@ -27,7 +27,7 @@ describe('SessionManager readiness window', () => {
             await mkdir(outputDir, { recursive: true })
             await writeFile(join(outputDir, 'index.m3u8'), '#EXTM3U\nsegment-000001.ts\n', 'utf8')
             await writeFile(join(outputDir, 'segment-000001.ts'), 'segment', 'utf8')
-          }, 5500)
+          }, 16000)
 
           return {
             manifestPath: join(outputDir, 'index.m3u8'),
@@ -64,5 +64,5 @@ describe('SessionManager readiness window', () => {
 
     expect(session.state).toBe('ready')
     await manager.stopAll()
-  }, 15000)
+  }, 25000)
 })

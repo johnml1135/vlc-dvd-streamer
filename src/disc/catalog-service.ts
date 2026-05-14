@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { VlcWorker } from '../vlc/worker.js'
-import type { CatalogSnapshot, DiscSummary, DiscTitle, RawDiscScan } from './types.js'
+import type { CatalogProgress, CatalogSnapshot, DiscSummary, DiscTitle, RawDiscScan } from './types.js'
 import type { ServerLog } from '../logging/server-log.js'
 
 export interface CatalogServiceOptions {
@@ -10,6 +10,7 @@ export interface CatalogServiceOptions {
   minVisibleTitleDurationSeconds: number
   worker: VlcWorker
   logger?: ServerLog
+  onSnapshot?: (snapshot: CatalogSnapshot) => void
 }
 
 export class CatalogService {
@@ -18,6 +19,7 @@ export class CatalogService {
     state: 'empty',
     disc: null,
   }
+  private refreshPromise: Promise<CatalogSnapshot> | null = null
 
   constructor(options: CatalogServiceOptions) {
     this.options = options
@@ -42,40 +44,80 @@ export class CatalogService {
     return this.snapshot.disc?.titles.find((title) => title.titleNumber === titleNumber)
   }
 
+  startRefresh(): void {
+    void this.refresh()
+  }
+
   async refresh(): Promise<CatalogSnapshot> {
+    if (this.refreshPromise) {
+      return this.refreshPromise
+    }
+
+    this.refreshPromise = this.runRefresh()
+    try {
+      return await this.refreshPromise
+    } finally {
+      this.refreshPromise = null
+    }
+  }
+
+  private async runRefresh(): Promise<CatalogSnapshot> {
     this.options.logger?.info('catalog', `Refreshing DVD catalog for ${this.options.drive}.`)
-    this.snapshot = {
+    this.setSnapshot({
       state: 'disc_detected',
       disc: null,
-    }
+      progress: undefined,
+    })
 
-    this.snapshot = {
+    this.setSnapshot({
       state: 'catalog_loading',
       disc: null,
-    }
+      progress: {
+        scannedTitles: 0,
+        totalTitles: null,
+        currentTitleNumber: null,
+      },
+    })
 
     try {
-      const scan = await this.options.worker.scanDisc({ drive: this.options.drive })
+      const scan = await this.options.worker.scanDisc({
+        drive: this.options.drive,
+        onProgress: (progress) => {
+          this.setSnapshot({
+            state: 'catalog_loading',
+            disc: null,
+            progress,
+          })
+        },
+      })
       const disc = await this.normalizeScan(scan)
 
-      this.snapshot = {
+      this.setSnapshot({
         state: 'catalog_ready',
         disc,
-      }
+        progress: undefined,
+      })
       this.options.logger?.info('catalog', `Catalog ready for ${disc.discId} with ${disc.titles.length} titles.`)
     } catch (error) {
-      this.snapshot = {
+      this.setSnapshot({
         state: 'catalog_error',
         disc: null,
+        progress: undefined,
         error: {
           message: 'Could not read DVD titles.',
           detail: error instanceof Error ? error.message : 'Unknown catalog error.',
         },
-      }
+      })
       this.options.logger?.error('catalog', this.snapshot.error?.detail ?? 'The VLC worker could not build a title catalog.')
     }
 
     return this.snapshot
+  }
+
+  private setSnapshot(snapshot: CatalogSnapshot): CatalogSnapshot {
+    this.snapshot = snapshot
+    this.options.onSnapshot?.(snapshot)
+    return snapshot
   }
 
   private async normalizeScan(scan: RawDiscScan): Promise<DiscSummary> {

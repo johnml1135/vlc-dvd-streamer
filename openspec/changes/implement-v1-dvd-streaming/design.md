@@ -2,7 +2,7 @@
 
 The repo is a planning scaffold for a Windows-hosted DVD streaming app. The desired v1 experience is personal and deterministic: insert a DVD, open a LAN web UI, choose a title, and play it through a normal browser video player. The app is intentionally not a ripper, media library, DVD menu emulator, or public internet service.
 
-The architecture is a Fastify + TypeScript server that owns state and lifecycle, plus VLC child processes that do all DVD access and media generation. VLC is a media engine only; the browser never talks directly to VLC in v1.
+The architecture is a Fastify + TypeScript server that owns state and lifecycle, plus VLC worker processes that do all DVD access and media generation. Most worker operations use managed VLC CLI processes. When language-bearing DVD track labels require playback-time ES discovery, the worker can use libVLC behind the same boundary. VLC is a media engine only; the browser never talks directly to VLC in v1.
 
 Because the app is Windows-hosted and command-driven, process supervision is part of the core architecture, not a low-level afterthought. The codebase should not let API handlers assemble ad-hoc shell strings or manage child-process lifecycle directly. Command construction, execution, timeout handling, and shutdown behavior need first-class boundaries.
 
@@ -12,6 +12,7 @@ User architecture decisions captured on 2026-05-13:
 - Backend stack is Fastify + TypeScript.
 - VLC is the only DVD engine. Remove FFmpeg fallback and other sidecar DVD access paths.
 - Title metadata comes through VLC only.
+- The worker chooses the stable public VLC control surface per job: direct CLI process control for preflight, probing, thumbnails, and HLS; playback-time libVLC events for language-bearing track labels; localhost-only HTTP only for diagnostics.
 - The app assumes one user, one viewer, one DVD player. Starting a different title stops the existing session and starts the new request.
 
 ## Goals / Non-Goals
@@ -82,6 +83,26 @@ Every operation that touches DVD media SHALL go through the VLC worker boundary.
 
 This keeps legal, operational, and testing boundaries simpler. It also avoids building two media pipelines before proving the first one.
 
+### Decision: Split VLC control by operation, not by subsystem
+
+The worker should choose the stable public VLC surface that best matches the operation while still presenting one app-internal abstraction.
+
+Use direct VLC executable processes with explicit argv arrays for:
+
+- preflight and version checks
+- base-disc and per-title probes for playable titles and durations
+- thumbnail capture
+- HLS transcode sessions
+
+Use playback-time libVLC media-player APIs for:
+
+- runtime ES discovery
+- language-bearing audio and subtitle label enrichment when CLI probe output is missing or ambiguous
+
+For DVD label enrichment, the worker should wait for `MediaPlayerESAdded` or `MediaPlayerESSelected` before reading `libvlc_media_tracks_get()`, `libvlc_audio_get_track_description()`, or `libvlc_video_get_spu_description()`. It should not rely on `libvlc_media_parse_with_options()` alone for `dvd:///` inputs on VLC 3.x because preparsing can skip disc MRLs.
+
+VLC's Lua HTTP interface remains optional and localhost-only for diagnostics or operator debugging. It is not the production control plane for v1.
+
 ### Decision: Model personal playback as replacement, not concurrency
 
 The session manager should maintain at most one active playback session per configured drive. If a request asks for the same title/options while a session is active, it can reuse the existing session. If it asks for a different title/options, the server stops the existing VLC process, cleans or retires its session directory, and starts the requested session.
@@ -106,7 +127,7 @@ The Vitest setup should split unit and integration suites so process-heavy integ
 
 - VLC `livehttp` may behave differently on Windows/VLC 3.x than the documented examples. Mitigation: validate on real hardware before polishing UI and keep command construction isolated.
 - Commercial DVDs may have confusing title structures. Mitigation: keep title filtering conservative and expose a show-extras path.
-- VLC-only metadata may be incomplete. Mitigation: surface unknown language/track metadata clearly and avoid pretending labels are richer than they are.
+- CLI probe metadata and libVLC preparsing can miss language-bearing DVD labels. Mitigation: attempt playback-time libVLC ES discovery before falling back, and surface generic labels clearly when runtime APIs still do not expose names.
 - Optional password off by default is easier for personal LAN use but weaker if exposed broadly. Mitigation: default to explicit LAN binding, display a warning when unauthenticated on non-loopback interfaces, and keep public internet out of scope.
 - Fake VLC tests can miss real drive timing and codec issues. Mitigation: maintain an env-gated hardware validation suite and do early prototype testing with real discs.
 - Windows process semantics differ from POSIX signal semantics. Mitigation: keep one documented process-supervision path, avoid shell wrappers, and test timeout/kill behavior against the fake VLC harness before real-hardware validation.
@@ -127,7 +148,7 @@ Implementation should proceed in vertical slices:
 
 ## Open Questions
 
-- Which exact VLC title-probing command gives reliable durations and track metadata on Windows VLC 3.x?
+- Which exact VLC CLI probing command gives reliable title numbers and durations on Windows VLC 3.x, and what opening window should the runtime libVLC enrichment pass allow before falling back to generic labels?
 - Does `dvd://D:#N` work consistently for representative discs, or does the worker need a second VLC-only MRL shape?
 - Which host binding should the first run default to: loopback with explicit LAN opt-in, or LAN interface with a visible unauthenticated warning?
 - What minimum DVD/title duration threshold should be the default for hiding short clips?

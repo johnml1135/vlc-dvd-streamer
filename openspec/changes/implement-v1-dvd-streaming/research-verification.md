@@ -3,6 +3,7 @@
 ## Verified Sources
 
 - VLC command-line help confirms the general stream MRL syntax `[[access][/demux]://]URL[#[title][:chapter][-[title][:chapter]]]`, DVD device inputs, dummy interface, scene filter options, playback start/run time options, audio/subtitle track options, stream output options, livehttp HLS output options, TS mux keyframe options, x264 options, deinterlace options, HTTP interface host/password options, and `vlc://quit`.
+- libVLC 3.0 media, media-player, and event documentation plus VLC 3.0.x source confirm that runtime track discovery is exposed through `libvlc_media_tracks_get()`, `libvlc_audio_get_track_description()`, `libvlc_video_get_spu_description()`, and media-player ES events such as `MediaPlayerESAdded` and `MediaPlayerESSelected`; DVD language strings are populated during active playback rather than guaranteed by media preparse for `dvd:///` inputs.
 - VLC HTTP requests documentation confirms `/requests/status.xml`, `/requests/playlist.xml`, `pl_stop`, `pl_empty`, `seek`, and `volume` style control commands. This remains diagnostics-only for v1 and must be localhost-bound if enabled.
 - hls.js documentation confirms hls.js works on top of a standard HTML video element, requires Media Source Extensions where native HLS is unavailable, supports MPEG-TS/H.264/AAC HLS inputs, and documents the native-HLS-first feature detection pattern using `video.canPlayType("application/vnd.apple.mpegurl")` before `Hls.isSupported()`.
 - MDN HTMLMediaElement documentation confirms the media properties, methods, and events used by the browser player, including `play()`, `pause()`, `currentTime`, `duration`, `volume`, `muted`, `buffered`, `seekable`, `loadedmetadata`, `timeupdate`, `seeking`, `seeked`, `playing`, `waiting`, and `error`.
@@ -17,17 +18,21 @@
 
 - Removed FFmpeg sidecar fallback from the v1 architecture. VLC remains the only DVD access and media generation engine.
 - Removed MakeMKV-style or other companion scanner paths from v1 title metadata. Title metadata SHALL come through VLC only.
+- Refined the VLC-only metadata rule into two public VLC control surfaces inside the same worker: CLI for managed scan/thumbnail/HLS jobs, and playback-time libVLC for track-label enrichment.
 - Changed the concurrency model from multi-client same-session sharing to personal single-viewer replacement: a different title/options request stops the active session and starts the new one.
 - Set optional password protection as off by default, with warnings when serving unauthenticated LAN-visible traffic.
 
 ## Command-Handling Conclusions
 
 - Managed VLC playback and thumbnail jobs should be spawned directly from the VLC executable path with an argv array, not through shell command strings.
+- For DVD metadata enrichment, `libvlc_media_parse_with_options()` is not a reliable primary source on VLC 3.x because `dvd:///` preparsing may be skipped.
+- The stable API path for language-bearing audio and subtitle labels is playback-time media-player control: start the title, wait for `MediaPlayerESAdded` or `MediaPlayerESSelected`, then read track descriptions or media tracks.
 - `shell: true` should be avoided for VLC execution because it complicates Windows quoting and can break reliable process termination.
 - `windowsHide: true` should be enabled for managed VLC processes on Windows to avoid console-window noise.
 - The runner should determine final completion on the `close` event, not only `exit`, so stdout/stderr capture is complete before status evaluation or cleanup.
 - The runner should explicitly handle `error`, `spawn`, `close`, and timeout/abort behavior as separate lifecycle events.
 - The app should keep managed VLC sessions attached to the server process rather than using `detached`, because replacement, inactivity cleanup, and shutdown all require reliable ownership of the running process.
+- VLC HTTP remains useful for manual diagnostics and debugging, but it should not become the app's normal orchestration path.
 - For automated tests, the preferred strategy is not to mock shell strings or `child_process` internals everywhere. Instead, isolate command creation behind a typed builder and run integration tests against a fake VLC executable that behaves like the real process boundary.
 - Process-heavy integration tests should be allowed to run sequentially when shared temp directories, ports, or fake executable state would make parallelism flaky.
 
