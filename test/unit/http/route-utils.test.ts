@@ -1,10 +1,19 @@
 import { describe, expect, it } from 'vitest'
-import { appendStreamFlag, isValidAssetName, isValidSessionId, parseBooleanQuery, rewriteManifest } from '../../../src/http/route-utils.js'
+import { appendStreamFlag, isValidAssetName, isValidSessionId, parseBooleanQuery, rewriteManifest, rewriteSessionManifest } from '../../../src/http/route-utils.js'
 
 describe('http route helpers', () => {
   it('rewrites only media lines in HLS manifests', () => {
     expect(rewriteManifest('#EXTM3U\n#EXTINF:10,\nsegment-000.ts\n', 'videoOnly')).toBe(
       '#EXTM3U\n#EXTINF:10,\nsegment-000.ts?videoOnly=1\n',
+    )
+  })
+
+  it('marks recovered HLS manifests with a discontinuity before media lines', () => {
+    expect(rewriteSessionManifest('#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nsegment-000101.ts\n', {
+      queryFlag: 'videoOnly',
+      recoveryEpoch: 1,
+    })).toBe(
+      '#EXTM3U\n#EXT-X-DISCONTINUITY-SEQUENCE:1\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\n#EXT-X-DISCONTINUITY\nsegment-000101.ts?videoOnly=1\n',
     )
   })
 

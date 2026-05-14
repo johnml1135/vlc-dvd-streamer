@@ -17,6 +17,8 @@ export interface HlsArgsInput {
   baseUrl: string
   audioTrack?: number
   subtitleTrack?: number
+  startTimeSeconds?: number
+  initialSegmentNumber?: number
 }
 
 export function buildThumbnailArgs(input: ThumbnailArgsInput): string[] {
@@ -48,6 +50,14 @@ export function buildHlsArgs(input: HlsArgsInput): string[] {
     '--no-sout-all',
     '--sout-x264-preset=veryfast',
   ]
+
+  if (typeof input.startTimeSeconds === 'number' && input.startTimeSeconds > 0) {
+    args.push('--start-time', String(input.startTimeSeconds), '--input-fast-seek')
+  }
+
+  if (typeof input.initialSegmentNumber === 'number' && input.initialSegmentNumber > 0) {
+    args.push(`--sout-livehttp-initial-segment-number=${input.initialSegmentNumber}`)
+  }
 
   if (typeof input.audioTrack === 'number') {
     args.push(`--audio-track=${input.audioTrack}`)

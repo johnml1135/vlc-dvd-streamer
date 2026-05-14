@@ -14,6 +14,8 @@ export interface StartHlsSessionInput {
   baseUrl: string
   audioTrack?: number
   subtitleTrack?: number
+  startTimeSeconds?: number
+  initialSegmentNumber?: number
 }
 
 export interface StartHlsSessionResult {
@@ -84,7 +86,7 @@ export class VlcWorker {
   async startHlsSession(input: StartHlsSessionInput): Promise<StartHlsSessionResult> {
     this.options.logger?.info(
       'session',
-      `Starting HLS session for title ${input.titleNumber}${input.audioTrack ? `, audio ${input.audioTrack}` : ''}${input.subtitleTrack ? `, subtitle ${input.subtitleTrack}` : ''}.`,
+      `Starting HLS session for title ${input.titleNumber}${typeof input.audioTrack === 'number' ? `, audio ${input.audioTrack}` : ''}${typeof input.subtitleTrack === 'number' ? `, subtitle ${input.subtitleTrack}` : ''}${typeof input.startTimeSeconds === 'number' && input.startTimeSeconds > 0 ? `, from ${input.startTimeSeconds}s` : ''}.`,
     )
 
     const command = this.options.shimScript
@@ -93,6 +95,8 @@ export class VlcWorker {
         `--drive=${input.drive}`,
         `--titleNumber=${input.titleNumber}`,
         `--outDir=${input.outputDir}`,
+        ...(typeof input.startTimeSeconds === 'number' ? [`--startTimeSeconds=${input.startTimeSeconds}`] : []),
+        ...(typeof input.initialSegmentNumber === 'number' ? [`--initialSegmentNumber=${input.initialSegmentNumber}`] : []),
       ], 0)
       : createCommandSpec({
         executable: this.options.executable,
@@ -103,6 +107,8 @@ export class VlcWorker {
           subtitleTrack: input.subtitleTrack,
           outputDir: input.outputDir,
           baseUrl: input.baseUrl,
+          startTimeSeconds: input.startTimeSeconds,
+          initialSegmentNumber: input.initialSegmentNumber,
         }),
         timeoutMs: 0,
         label: 'vlc-hls',

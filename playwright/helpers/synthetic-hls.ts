@@ -204,6 +204,9 @@ function installHarness(video, source) {
 }
 
 export default class SyntheticHls {
+  static Events = { ERROR: 'hlsError' }
+  static ErrorTypes = { MEDIA_ERROR: 'mediaError', NETWORK_ERROR: 'networkError' }
+
   static isSupported() {
     return ${profile === 'healthy' ? 'true' : 'false'}
   }
@@ -220,6 +223,10 @@ export default class SyntheticHls {
   destroy() {
     this.harness?.destroy()
   }
+
+  recoverMediaError() {}
+
+  startLoad() {}
 
   on() {}
 

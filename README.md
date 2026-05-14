@@ -105,6 +105,15 @@ Helpful UI details:
 - `Stop Stream` ends the current VLC-backed session.
 - `Back to titles` returns to the thumbnail grid without closing the server.
 
+If VLC stops producing new HLS segments during playback, the server treats that as a possible unreadable DVD area instead of waiting indefinitely. It stops the stalled VLC process, restarts the same title about 10 seconds farther ahead, serves the next HLS manifest with discontinuity markers, and shows a short recovery status on the player page. The browser should only see a coherent stream resume after the skipped range.
+
+Recovery defaults can be tuned with these environment variables when you need to experiment with a difficult disc:
+
+- `SESSION_RECOVERY_STALL_MS` defaults to `12000`.
+- `SESSION_RECOVERY_RESTART_READINESS_MS` defaults to `30000`.
+- `SESSION_RECOVERY_SKIP_SECONDS` defaults to `10`.
+- `SESSION_RECOVERY_MAX_ATTEMPTS` defaults to `6`.
+
 ## LAN And Firewall Notes
 
 The installed path is intended for local network access only.

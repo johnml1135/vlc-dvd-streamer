@@ -66,6 +66,13 @@ const sessionManager = new SessionManager({
   cacheDir: config.cacheDir,
   inactivityMs: config.inactiveSessionMs ?? 900000,
   readinessTimeoutMs: config.sessionReadinessTimeoutMs ?? 120000,
+  playbackRecovery: {
+    stallTimeoutMs: config.sessionRecoveryStallMs ?? 12000,
+    restartReadinessTimeoutMs: config.sessionRecoveryRestartReadinessMs ?? 30000,
+    skipSeconds: config.sessionRecoverySkipSeconds ?? 10,
+    maxAttempts: config.sessionRecoveryMaxAttempts ?? 6,
+  },
+  onSessionEvent: (event) => eventHub.publish(event),
   worker,
   logger: serverLog,
 })

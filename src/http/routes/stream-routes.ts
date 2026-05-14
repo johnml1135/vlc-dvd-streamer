@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import type { FastifyInstance } from 'fastify'
 import type { AppContext } from '../app-types.js'
-import { isValidAssetName, isValidSessionId, parseBooleanQuery, rewriteManifest, sendApiError } from '../route-utils.js'
+import { isValidAssetName, isValidSessionId, parseBooleanQuery, rewriteSessionManifest, sendApiError } from '../route-utils.js'
 import { normalizeHlsTransportStream } from '../../vlc/transport-stream.js'
 
 interface StreamParams {
@@ -44,7 +44,10 @@ export async function registerStreamRoutes(app: FastifyInstance, context: AppCon
     try {
       const file = await readFile(`${session.outputDir}/${asset}`)
       if (asset.endsWith('.m3u8')) {
-        const content = videoOnly ? rewriteManifest(file.toString('utf8'), 'videoOnly') : file
+        const content = rewriteSessionManifest(file.toString('utf8'), {
+          queryFlag: videoOnly ? 'videoOnly' : undefined,
+          recoveryEpoch: session.recovery?.epoch,
+        })
         reply.type('application/vnd.apple.mpegurl').send(content)
         return
       }

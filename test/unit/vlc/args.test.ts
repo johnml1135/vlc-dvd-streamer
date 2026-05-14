@@ -75,4 +75,20 @@ describe('buildHlsArgs', () => {
     expect(args).toContain('--audio-language=en')
     expect(args.some((arg) => arg.startsWith('--audio-track='))).toBe(false)
   })
+
+  it('can restart playback from a later title time with non-reused HLS segment numbers', () => {
+    const args = buildHlsArgs({
+      drive: 'D:',
+      titleNumber: 4,
+      outputDir: 'C:/cache/sessions/session-1',
+      baseUrl: '/streams/session-1/',
+      startTimeSeconds: 3720,
+      initialSegmentNumber: 101,
+    })
+
+    expect(args).toContain('--start-time')
+    expect(args).toContain('3720')
+    expect(args).toContain('--input-fast-seek')
+    expect(args).toContain('--sout-livehttp-initial-segment-number=101')
+  })
 })

@@ -26,7 +26,7 @@ test('starting with subtitles off returns home and stops the active session', as
   expect(sessionResponse.ok()).toBe(true)
   const session = await sessionResponse.json()
 
-  expect(session.audioTrack).toBe(1)
+  expect(session.audioTrack).toBeUndefined()
   expect(session.subtitleTrack).toBeUndefined()
 
   await page.getByRole('link', { name: 'Back to titles' }).click()
@@ -70,7 +70,7 @@ test('selected audio and subtitles carry into the session and a new title replac
   const secondSession = await secondSessionResponse.json()
 
   expect(secondSession.titleNumber).toBe(2)
-  expect(secondSession.audioTrack).toBe(1)
+  expect(secondSession.audioTrack).toBeUndefined()
   expect(secondSession.subtitleTrack).toBeUndefined()
 
   const previousSessionResponse = await request.get(`/api/sessions/${firstSessionId}`)

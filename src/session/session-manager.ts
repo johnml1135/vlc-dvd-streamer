@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { access, mkdir, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ManagedProcessHandle } from '../vlc/process-supervisor.js'
-import type { VlcWorker } from '../vlc/worker.js'
+import type { StartHlsSessionInput, StartHlsSessionResult } from '../vlc/worker.js'
 import type { ServerLog } from '../logging/server-log.js'
 
 export type SessionState = 'starting' | 'ready' | 'failed' | 'stopping' | 'stopped'
@@ -27,19 +27,92 @@ export interface PlaybackSession extends SessionRequest {
     message: string
     detail?: string
   }
+  recovery?: PlaybackRecoverySnapshot
 }
 
 interface SessionRecord extends PlaybackSession {
   handle: ManagedProcessHandle
+  baseUrl: string
+  recoveryRuntime: PlaybackRecoveryRuntime
+  recoveryTimer?: NodeJS.Timeout
+  recoveryInFlight: boolean
+}
+
+export interface PlaybackRecoveryRange {
+  startSeconds: number
+  endSeconds: number
+  reason: string
+}
+
+export type PlaybackRecoveryStatus = 'idle' | 'recovering' | 'exhausted'
+
+export interface PlaybackRecoverySnapshot {
+  enabled: boolean
+  status: PlaybackRecoveryStatus
+  attempts: number
+  epoch: number
+  skippedSeconds: number
+  lastGoodTimeSeconds: number
+  lastProgressAt?: string
+  lastSegmentName?: string
+  message?: string
+  badRanges: PlaybackRecoveryRange[]
+}
+
+export interface PlaybackRecoveryOptions {
+  enabled?: boolean
+  stallTimeoutMs?: number
+  monitorIntervalMs?: number
+  restartReadinessTimeoutMs?: number
+  stopTimeoutMs?: number
+  skipSeconds?: number
+  maxAttempts?: number
+  segmentDurationSeconds?: number
+}
+
+interface PlaybackRecoveryRuntime extends PlaybackRecoverySnapshot {
+  consecutiveAttempts: number
+  epochStartTimeSeconds: number
+  epochInitialSegmentNumber: number | null
+  lastProgressAtMs: number | null
+  lastSegmentNumber: number | null
+}
+
+interface HlsProgress {
+  segmentNames: string[]
+  lastSegmentName: string
+  lastSegmentNumber: number | null
+}
+
+interface HlsSessionWorker {
+  startHlsSession(input: StartHlsSessionInput): Promise<StartHlsSessionResult>
+}
+
+export interface SessionManagerEvent {
+  type: string
+  payload: unknown
 }
 
 export interface SessionManagerOptions {
   cacheDir: string
   inactivityMs: number
-  worker: VlcWorker
+  worker: HlsSessionWorker
   readinessTimeoutMs?: number
+  playbackRecovery?: PlaybackRecoveryOptions
+  onSessionEvent?: (event: SessionManagerEvent) => void
   logger?: ServerLog
 }
+
+const DEFAULT_RECOVERY_OPTIONS = {
+  enabled: true,
+  stallTimeoutMs: 12000,
+  monitorIntervalMs: 1000,
+  restartReadinessTimeoutMs: 30000,
+  stopTimeoutMs: 5000,
+  skipSeconds: 10,
+  maxAttempts: 6,
+  segmentDurationSeconds: 2,
+} satisfies Required<PlaybackRecoveryOptions>
 
 export class SessionManager {
   private readonly options: SessionManagerOptions
@@ -91,6 +164,7 @@ export class SessionManager {
 
     const id = randomUUID()
     const outputDir = join(this.options.cacheDir, 'sessions', id)
+    const baseUrl = `/streams/${id}/`
     await mkdir(outputDir, { recursive: true })
 
     const now = new Date().toISOString()
@@ -100,7 +174,7 @@ export class SessionManager {
       audioTrack: request.audioTrack,
       subtitleTrack: request.subtitleTrack,
       outputDir,
-      baseUrl: `/streams/${id}/`,
+      baseUrl,
     })
 
     const session: SessionRecord = {
@@ -113,6 +187,9 @@ export class SessionManager {
       startedAt: now,
       lastAccessedAt: now,
       handle: runtime.handle,
+      baseUrl,
+      recoveryRuntime: createInitialRecoveryRuntime(this.getRecoveryOptions().enabled),
+      recoveryInFlight: false,
     }
 
     this.sessions.set(id, session)
@@ -121,9 +198,15 @@ export class SessionManager {
 
     try {
       await this.waitForReadiness(session)
+      const initialProgress = await this.readHlsProgress(session.outputDir, session.manifestPath)
+      if (initialProgress) {
+        this.notePlaybackProgress(session, initialProgress, Date.now())
+      }
       session.state = 'ready'
+      session.recovery = this.toRecoverySnapshot(session.recoveryRuntime)
       session.lastAccessedAt = new Date().toISOString()
       this.options.logger?.info('session', `Session ${session.id} is ready.`)
+      this.scheduleRecoveryMonitor(session)
       return this.toPlaybackSession(session)
     } catch (error) {
       await this.cleanupFailedStartup(session)
@@ -145,8 +228,9 @@ export class SessionManager {
     }
 
     session.state = 'stopping'
+    this.clearRecoveryMonitor(session)
     this.options.logger?.info('session', `Stopping session ${session.id}.`)
-    await session.handle.stop()
+    await this.stopHandle(session.handle, `session ${session.id}`)
     await rm(session.outputDir, { force: true, recursive: true })
     session.state = 'stopped'
 
@@ -205,7 +289,7 @@ export class SessionManager {
     try {
       await access(manifestPath)
       const manifest = await readFile(manifestPath, 'utf8')
-      const segmentName = getFirstSegmentName(manifest)
+      const segmentName = getSegmentNames(manifest)[0]
       if (!segmentName) {
         return false
       }
@@ -219,7 +303,7 @@ export class SessionManager {
 
   private async cleanupFailedStartup(session: SessionRecord): Promise<void> {
     try {
-      await session.handle.stop()
+      await this.stopHandle(session.handle, `failed startup session ${session.id}`)
     } catch (error) {
       this.options.logger?.warn('session', `Failed to stop session ${session.id} after startup failure: ${formatError(error)}`)
     }
@@ -240,6 +324,7 @@ export class SessionManager {
   }
 
   private toPlaybackSession(session: SessionRecord): PlaybackSession {
+    session.recovery = this.toRecoverySnapshot(session.recoveryRuntime)
     return {
       discId: session.discId,
       drive: session.drive,
@@ -254,6 +339,265 @@ export class SessionManager {
       startedAt: session.startedAt,
       lastAccessedAt: session.lastAccessedAt,
       error: session.error,
+      recovery: session.recovery,
+    }
+  }
+
+  private scheduleRecoveryMonitor(session: SessionRecord): void {
+    const recoveryOptions = this.getRecoveryOptions()
+    if (!recoveryOptions.enabled || session.state !== 'ready') {
+      return
+    }
+
+    this.clearRecoveryMonitor(session)
+    session.recoveryTimer = setTimeout(() => {
+      void this.runRecoveryMonitorTick(session)
+    }, recoveryOptions.monitorIntervalMs)
+  }
+
+  private clearRecoveryMonitor(session: SessionRecord): void {
+    if (session.recoveryTimer) {
+      clearTimeout(session.recoveryTimer)
+      session.recoveryTimer = undefined
+    }
+  }
+
+  private async runRecoveryMonitorTick(session: SessionRecord): Promise<void> {
+    if (session.recoveryInFlight || session.state !== 'ready') {
+      this.scheduleRecoveryMonitor(session)
+      return
+    }
+
+    session.recoveryInFlight = true
+    try {
+      await this.checkPlaybackProgress(session)
+    } catch (error) {
+      this.options.logger?.warn('session', `Recovery monitor for session ${session.id} failed: ${formatError(error)}`)
+    } finally {
+      session.recoveryInFlight = false
+      this.scheduleRecoveryMonitor(session)
+    }
+  }
+
+  private async checkPlaybackProgress(session: SessionRecord): Promise<void> {
+    const recoveryOptions = this.getRecoveryOptions()
+    const progress = await this.readHlsProgress(session.outputDir, session.manifestPath)
+    const now = Date.now()
+
+    if (progress && progress.lastSegmentName !== session.recoveryRuntime.lastSegmentName) {
+      this.notePlaybackProgress(session, progress, now)
+      if (session.recoveryRuntime.status === 'recovering') {
+        session.recoveryRuntime.status = 'idle'
+        session.recoveryRuntime.consecutiveAttempts = 0
+        session.recoveryRuntime.message = `Recovered playback after skipping ${recoveryOptions.skipSeconds} seconds.`
+        this.publishRecoveryEvent(session)
+      }
+      return
+    }
+
+    if (session.recoveryRuntime.lastProgressAtMs === null) {
+      return
+    }
+
+    if (now - session.recoveryRuntime.lastProgressAtMs >= recoveryOptions.stallTimeoutMs) {
+      await this.recoverStalledPlayback(session)
+    }
+  }
+
+  private async recoverStalledPlayback(session: SessionRecord): Promise<void> {
+    const recoveryOptions = this.getRecoveryOptions()
+    const nextAttempt = session.recoveryRuntime.consecutiveAttempts + 1
+    if (nextAttempt > recoveryOptions.maxAttempts) {
+      await this.exhaustRecovery(session)
+      return
+    }
+
+    const previousSegmentName = session.recoveryRuntime.lastSegmentName
+    const previousLastGoodTimeSeconds = session.recoveryRuntime.lastGoodTimeSeconds
+    const resumeTimeSeconds = previousLastGoodTimeSeconds + recoveryOptions.skipSeconds * nextAttempt
+    const initialSegmentNumber = (session.recoveryRuntime.lastSegmentNumber ?? 0) + 1
+
+    session.recoveryRuntime.status = 'recovering'
+    session.recoveryRuntime.attempts += 1
+    session.recoveryRuntime.consecutiveAttempts = nextAttempt
+    session.recoveryRuntime.skippedSeconds += recoveryOptions.skipSeconds
+    session.recoveryRuntime.message = `Unreadable DVD area detected. Skipping ahead to ${resumeTimeSeconds} seconds.`
+    session.recoveryRuntime.badRanges.push({
+      startSeconds: previousLastGoodTimeSeconds,
+      endSeconds: resumeTimeSeconds,
+      reason: 'dvd-read-stall',
+    })
+    this.publishRecoveryEvent(session)
+    this.options.logger?.warn('session', `Session ${session.id} stalled near ${previousLastGoodTimeSeconds}s; restarting VLC at ${resumeTimeSeconds}s.`)
+
+    await this.stopHandle(session.handle, `stalled session ${session.id}`)
+
+    try {
+      const runtime = await this.options.worker.startHlsSession({
+        drive: session.drive,
+        titleNumber: session.titleNumber,
+        audioTrack: session.audioTrack,
+        subtitleTrack: session.subtitleTrack,
+        outputDir: session.outputDir,
+        baseUrl: session.baseUrl,
+        startTimeSeconds: resumeTimeSeconds,
+        initialSegmentNumber,
+      })
+      session.handle = runtime.handle
+      session.manifestPath = runtime.manifestPath
+      session.recoveryRuntime.epoch += 1
+      session.recoveryRuntime.epochStartTimeSeconds = resumeTimeSeconds
+      session.recoveryRuntime.epochInitialSegmentNumber = initialSegmentNumber
+
+      const progress = await this.waitForRecoveryReadiness(session, previousSegmentName)
+      this.notePlaybackProgress(session, progress, Date.now())
+      session.recoveryRuntime.status = 'idle'
+      session.recoveryRuntime.consecutiveAttempts = 0
+      session.recoveryRuntime.message = `Skipped ${resumeTimeSeconds - previousLastGoodTimeSeconds} seconds and resumed playback.`
+      this.publishRecoveryEvent(session)
+    } catch (error) {
+      session.recoveryRuntime.message = `Recovery attempt did not produce HLS output: ${formatError(error)}`
+      this.publishRecoveryEvent(session)
+      this.options.logger?.warn('session', `Session ${session.id} recovery attempt failed: ${formatError(error)}`)
+    }
+  }
+
+  private async waitForRecoveryReadiness(session: SessionRecord, previousSegmentName: string | undefined): Promise<HlsProgress> {
+    const recoveryOptions = this.getRecoveryOptions()
+    const deadline = Date.now() + recoveryOptions.restartReadinessTimeoutMs
+
+    while (Date.now() < deadline) {
+      const progress = await this.readHlsProgress(session.outputDir, session.manifestPath)
+      if (progress && progress.lastSegmentName !== previousSegmentName) {
+        return progress
+      }
+
+      const status = await Promise.race([
+        session.handle.completion.then(() => 'exited' as const),
+        delay(100).then(() => 'pending' as const),
+      ])
+
+      if (status === 'exited') {
+        const result = await session.handle.completion
+        throw new Error(result.stderr || result.stdout || 'VLC exited before recovered HLS output was ready.')
+      }
+    }
+
+    throw new Error('Timed out waiting for recovered HLS output.')
+  }
+
+  private async exhaustRecovery(session: SessionRecord): Promise<void> {
+    this.clearRecoveryMonitor(session)
+    session.recoveryRuntime.status = 'exhausted'
+    session.recoveryRuntime.message = 'Playback stopped after repeated unreadable DVD sectors.'
+    session.state = 'failed'
+    session.error = {
+      message: 'Playback stopped after repeated unreadable DVD sectors.',
+      detail: `VLC could not recover after ${session.recoveryRuntime.attempts} skip attempts.`,
+    }
+    if (this.activeSessionId === session.id) {
+      this.activeSessionId = null
+    }
+    await this.stopHandle(session.handle, `exhausted recovery session ${session.id}`)
+    this.publishRecoveryEvent(session)
+    this.publishSessionEvent({ type: 'session.updated', payload: this.toPlaybackSession(session) })
+  }
+
+  private async readHlsProgress(outputDir: string, manifestPath: string): Promise<HlsProgress | null> {
+    try {
+      const manifest = await readFile(manifestPath, 'utf8')
+      const segmentNames = getSegmentNames(manifest)
+      const lastSegmentName = segmentNames.at(-1)
+      if (!lastSegmentName) {
+        return null
+      }
+
+      const segment = await readFile(join(outputDir, lastSegmentName))
+      if (segment.length === 0 || segment[0] !== 0x47) {
+        return null
+      }
+
+      return {
+        segmentNames,
+        lastSegmentName,
+        lastSegmentNumber: parseSegmentNumber(lastSegmentName),
+      }
+    } catch {
+      return null
+    }
+  }
+
+  private notePlaybackProgress(session: SessionRecord, progress: HlsProgress, nowMs: number): void {
+    const recoveryOptions = this.getRecoveryOptions()
+    const runtime = session.recoveryRuntime
+    runtime.lastSegmentName = progress.lastSegmentName
+    runtime.lastSegmentNumber = progress.lastSegmentNumber
+    runtime.lastProgressAtMs = nowMs
+    runtime.lastProgressAt = new Date(nowMs).toISOString()
+
+    if (progress.lastSegmentNumber !== null && runtime.epochInitialSegmentNumber !== null) {
+      runtime.lastGoodTimeSeconds = runtime.epochStartTimeSeconds
+        + Math.max(1, progress.lastSegmentNumber - runtime.epochInitialSegmentNumber + 1) * recoveryOptions.segmentDurationSeconds
+      return
+    }
+
+    runtime.lastGoodTimeSeconds = Math.max(
+      runtime.lastGoodTimeSeconds + recoveryOptions.segmentDurationSeconds,
+      runtime.epochStartTimeSeconds + progress.segmentNames.length * recoveryOptions.segmentDurationSeconds,
+    )
+  }
+
+  private async stopHandle(handle: ManagedProcessHandle, label: string): Promise<void> {
+    const recoveryOptions = this.getRecoveryOptions()
+    const stopPromise = handle.stop()
+    stopPromise.catch((error) => {
+      this.options.logger?.warn('session', `Failed to stop ${label}: ${formatError(error)}`)
+    })
+
+    const stopped = await Promise.race([
+      stopPromise.then(() => true),
+      delay(recoveryOptions.stopTimeoutMs).then(() => false),
+    ])
+
+    if (!stopped) {
+      this.options.logger?.warn('session', `Timed out while stopping ${label}; continuing recovery without blocking the app.`)
+    }
+  }
+
+  private publishRecoveryEvent(session: SessionRecord): void {
+    session.recovery = this.toRecoverySnapshot(session.recoveryRuntime)
+    this.publishSessionEvent({
+      type: 'session.recovery',
+      payload: {
+        sessionId: session.id,
+        ...session.recovery,
+      },
+    })
+  }
+
+  private publishSessionEvent(event: SessionManagerEvent): void {
+    this.options.onSessionEvent?.(event)
+  }
+
+  private toRecoverySnapshot(runtime: PlaybackRecoveryRuntime): PlaybackRecoverySnapshot {
+    return {
+      enabled: runtime.enabled,
+      status: runtime.status,
+      attempts: runtime.attempts,
+      epoch: runtime.epoch,
+      skippedSeconds: runtime.skippedSeconds,
+      lastGoodTimeSeconds: runtime.lastGoodTimeSeconds,
+      lastProgressAt: runtime.lastProgressAt,
+      lastSegmentName: runtime.lastSegmentName,
+      message: runtime.message,
+      badRanges: runtime.badRanges.map((range) => ({ ...range })),
+    }
+  }
+
+  private getRecoveryOptions(): Required<PlaybackRecoveryOptions> {
+    return {
+      ...DEFAULT_RECOVERY_OPTIONS,
+      ...this.options.playbackRecovery,
     }
   }
 }
@@ -262,23 +606,44 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-function getFirstSegmentName(manifest: string): string | null {
+function createInitialRecoveryRuntime(enabled: boolean): PlaybackRecoveryRuntime {
+  return {
+    enabled,
+    status: 'idle',
+    attempts: 0,
+    consecutiveAttempts: 0,
+    epoch: 0,
+    skippedSeconds: 0,
+    lastGoodTimeSeconds: 0,
+    lastProgressAtMs: null,
+    lastSegmentNumber: null,
+    epochStartTimeSeconds: 0,
+    epochInitialSegmentNumber: 1,
+    badRanges: [],
+  }
+}
+
+function getSegmentNames(manifest: string): string[] {
   if (!manifest.trimStart().startsWith('#EXTM3U')) {
-    return null
+    return []
   }
 
-  const segmentLine = manifest
+  return manifest
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .find((line) => line && !line.startsWith('#'))
+    .filter((line) => line && !line.startsWith('#'))
+    .map((line) => line.split('?')[0]?.split('/').filter(Boolean).at(-1))
+    .filter((segmentName): segmentName is string => Boolean(segmentName?.endsWith('.ts')))
+}
 
-  if (!segmentLine) {
+function parseSegmentNumber(segmentName: string): number | null {
+  const match = /segment-(\d+)\.ts$/i.exec(segmentName)
+  if (!match) {
     return null
   }
 
-  const withoutQuery = segmentLine.split('?')[0]
-  const segmentName = withoutQuery.split('/').filter(Boolean).at(-1)
-  return segmentName?.endsWith('.ts') ? segmentName : null
+  const parsed = Number(match[1])
+  return Number.isInteger(parsed) ? parsed : null
 }
 
 function formatError(error: unknown): string {

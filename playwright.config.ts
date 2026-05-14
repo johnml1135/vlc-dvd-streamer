@@ -10,7 +10,7 @@ export default defineConfig({
     headless: true,
   },
   webServer: {
-    command: 'npm start',
+    command: 'npm run start:foreground',
     port,
     reuseExistingServer: false,
     env: {

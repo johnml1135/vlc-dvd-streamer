@@ -97,7 +97,44 @@ export function renderPlayerPage(input: PlayerPageInput): string {
             const Hls = module.default
 
             if (!prefersNativeHls && Hls && typeof Hls.isSupported === 'function' && Hls.isSupported()) {
-              const hls = new Hls()
+              const hls = new Hls({
+                liveMaxUnchangedPlaylistRefresh: 3,
+                detectStallWithCurrentTimeMs: 1250,
+                highBufferWatchdogPeriod: 2,
+                nudgeMaxRetry: 5,
+                handleMpegTsVideoIntegrityErrors: 'skip',
+                fragLoadPolicy: {
+                  default: {
+                    maxTimeToFirstByteMs: 10000,
+                    maxLoadTimeMs: 30000,
+                    timeoutRetry: { maxNumRetry: 2, retryDelayMs: 0, maxRetryDelayMs: 1000 },
+                    errorRetry: { maxNumRetry: 3, retryDelayMs: 1000, maxRetryDelayMs: 4000, backoff: 'linear' },
+                  },
+                },
+              })
+              let lastMediaRecoveryAt = 0
+              hls.on(Hls.Events.ERROR, (_event, data) => {
+                if (!data || !status) {
+                  return
+                }
+
+                if (data.type === Hls.ErrorTypes.MEDIA_ERROR && data.fatal) {
+                  const now = Date.now()
+                  if (now - lastMediaRecoveryAt > 5000 && typeof hls.recoverMediaError === 'function') {
+                    lastMediaRecoveryAt = now
+                    status.textContent = 'Recovering the video decoder after a stream discontinuity.'
+                    hls.recoverMediaError()
+                  }
+                  return
+                }
+
+                if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+                  status.textContent = 'Waiting for recovered HLS data from the server.'
+                  if (data.fatal && typeof hls.startLoad === 'function') {
+                    hls.startLoad(-1)
+                  }
+                }
+              })
               hls.loadSource(playbackManifestUrl)
               hls.attachMedia(video)
               status.textContent = isEmbeddedCodeBrowser
@@ -520,6 +557,7 @@ function renderLayout(input: {
       </details>
       <script>
         const logOutput = document.getElementById('server-log-output')
+        const playerStatus = document.getElementById('player-status')
 
         function formatLogEntry(entry) {
           if (!entry || typeof entry !== 'object') {
@@ -571,6 +609,26 @@ function renderLayout(input: {
           logOutput.scrollTop = logOutput.scrollHeight
         }
 
+        function describeRecoveryEvent(payload) {
+          if (!payload || typeof payload !== 'object') {
+            return ''
+          }
+
+          if (payload.status === 'recovering') {
+            return 'Unreadable DVD area detected. Skipping ahead while the server rebuilds the stream.'
+          }
+
+          if (payload.status === 'idle' && typeof payload.skippedSeconds === 'number' && payload.skippedSeconds > 0) {
+            return 'Recovered playback after skipping ' + payload.skippedSeconds + ' seconds of unreadable DVD data.'
+          }
+
+          if (payload.status === 'exhausted') {
+            return 'Playback stopped because the DVD stayed unreadable after repeated skip attempts.'
+          }
+
+          return ''
+        }
+
         async function loadServerLogs() {
           if (!logOutput) {
             return
@@ -610,6 +668,14 @@ function renderLayout(input: {
 
             if (event.type === 'server.log') {
               appendLogEntry(event.payload)
+              return
+            }
+
+            if (event.type === 'session.recovery') {
+              const recoveryText = describeRecoveryEvent(event.payload)
+              if (playerStatus && recoveryText) {
+                playerStatus.textContent = recoveryText
+              }
               return
             }
 
