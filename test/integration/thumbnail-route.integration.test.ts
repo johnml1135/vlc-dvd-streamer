@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { buildApp } from '../../src/app.js'
+import { createCatalogServiceStub, createVlcWorkerStub } from '../helpers/app-stubs.js'
 
 describe('thumbnail route', () => {
   it('creates the title thumbnail directory before invoking the worker', async () => {
@@ -15,7 +16,7 @@ describe('thumbnail route', () => {
         vlcCandidates: [process.execPath],
       },
       services: {
-        catalogService: {
+        catalogService: createCatalogServiceStub({
           getSnapshot() {
             return {
               state: 'catalog_ready',
@@ -42,14 +43,14 @@ describe('thumbnail route', () => {
               subtitleTracks: [],
             }
           },
-        },
-        vlcWorker: {
+        }),
+        vlcWorker: createVlcWorkerStub({
           async generateThumbnail({ outputDir }: { outputDir: string }) {
             const outputPath = join(outputDir, 'thumbnail.jpg')
             await writeFile(outputPath, 'REAL_THUMB', 'utf8')
             return { outputPath }
           },
-        },
+        }),
       },
     })
 

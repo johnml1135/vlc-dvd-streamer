@@ -7,6 +7,7 @@ import { CatalogService } from '../../src/disc/catalog-service.js'
 import type { CatalogSnapshot } from '../../src/disc/types.js'
 import { SessionManager } from '../../src/session/session-manager.js'
 import { VlcWorker } from '../../src/vlc/worker.js'
+import { createCatalogServiceStub, createSessionManagerStub } from '../helpers/app-stubs.js'
 
 describe('app API', () => {
   it('renders the home page immediately while the catalog refresh continues in the background', async () => {
@@ -40,7 +41,7 @@ describe('app API', () => {
         vlcCandidates: [process.execPath],
       },
       services: {
-        catalogService: {
+        catalogService: createCatalogServiceStub({
           getSnapshot() {
             return snapshot
           },
@@ -67,12 +68,12 @@ describe('app API', () => {
           findTitle() {
             return undefined
           },
-        },
-        sessionManager: {
+        }),
+        sessionManager: createSessionManagerStub({
           getActiveSession() {
             return undefined
           },
-        },
+        }),
       },
     })
 
@@ -191,7 +192,7 @@ describe('app API', () => {
         vlcCandidates: [process.execPath],
       },
       services: {
-        catalogService: {
+        catalogService: createCatalogServiceStub({
           getSnapshot() {
             return {
               state: 'catalog_ready',
@@ -218,10 +219,10 @@ describe('app API', () => {
               subtitleTracks: [{ id: 2, label: 'English subtitles' }],
             }
           },
-        },
-        sessionManager: {
+        }),
+        sessionManager: createSessionManagerStub({
           start: startSession,
-        },
+        }),
       },
     })
 
