@@ -4,6 +4,17 @@ import { join } from 'node:path'
 import type { ManagedProcessHandle } from '../vlc/process-supervisor.js'
 import type { StartHlsSessionInput, StartHlsSessionResult } from '../vlc/worker.js'
 import type { ServerLog } from '../logging/server-log.js'
+import {
+  buildStitchedManifest,
+  createInitialTimelineRuntime,
+  isTimeInRange,
+  noteTimelineProgress,
+  normalizeSeekPosition,
+  segmentNumberForTime,
+  toTimelineSnapshot,
+  type PlaybackTimelineRuntime,
+  type PlaybackTimelineSnapshot,
+} from './timeline.js'
 
 export type SessionState = 'starting' | 'ready' | 'failed' | 'stopping' | 'stopped'
 
@@ -39,32 +50,6 @@ interface SessionRecord extends PlaybackSession {
   timelineRuntime: PlaybackTimelineRuntime
   recoveryTimer?: NodeJS.Timeout
   recoveryInFlight: boolean
-}
-
-export interface PlaybackTimelineRange {
-  startSeconds: number
-  endSeconds: number
-}
-
-export type PlaybackTimelineStatus = 'idle' | 'seeking'
-
-export interface PlaybackTimelineSnapshot {
-  durationSeconds?: number
-  status: PlaybackTimelineStatus
-  currentRange: PlaybackTimelineRange
-  generatedRanges: PlaybackTimelineRange[]
-  stitchedManifestUrl: string
-  lastSeekSeconds?: number
-  message?: string
-}
-
-interface PlaybackTimelineRuntime {
-  durationSeconds?: number
-  status: PlaybackTimelineStatus
-  currentRange: PlaybackTimelineRange
-  generatedSegmentNumbers: Set<number>
-  lastSeekSeconds?: number
-  message?: string
 }
 
 export type PlaybackSeekAction = 'already-available' | 'restarted'
@@ -188,7 +173,7 @@ export class SessionManager {
       return null
     }
 
-    return buildStitchedManifest(session, this.getRecoveryOptions().segmentDurationSeconds)
+    return buildStitchedManifest(session.timelineRuntime, this.getRecoveryOptions().segmentDurationSeconds)
   }
 
   touch(sessionId: string): void {
@@ -484,7 +469,7 @@ export class SessionManager {
       lastAccessedAt: session.lastAccessedAt,
       error: session.error,
       recovery: session.recovery,
-      timeline: this.toTimelineSnapshot(session),
+      timeline: toTimelineSnapshot(session.timelineRuntime, session.baseUrl, this.getRecoveryOptions().segmentDurationSeconds),
     }
   }
 
@@ -675,7 +660,7 @@ export class SessionManager {
   private notePlaybackProgress(session: SessionRecord, progress: HlsProgress, nowMs: number): void {
     const recoveryOptions = this.getRecoveryOptions()
     const runtime = session.recoveryRuntime
-    this.noteTimelineProgress(session, progress)
+    noteTimelineProgress(session.timelineRuntime, progress.segmentNames, recoveryOptions.segmentDurationSeconds)
     runtime.lastSegmentName = progress.lastSegmentName
     runtime.lastSegmentNumber = progress.lastSegmentNumber
     runtime.lastProgressAtMs = nowMs
@@ -740,52 +725,6 @@ export class SessionManager {
     }
   }
 
-  private toTimelineSnapshot(session: SessionRecord): PlaybackTimelineSnapshot {
-    const timeline = session.timelineRuntime
-    return {
-      durationSeconds: timeline.durationSeconds,
-      status: timeline.status,
-      currentRange: { ...timeline.currentRange },
-      generatedRanges: rangesFromSegmentNumbers(
-        timeline.generatedSegmentNumbers,
-        this.getRecoveryOptions().segmentDurationSeconds,
-        timeline.durationSeconds,
-      ),
-      stitchedManifestUrl: `${session.baseUrl}stitched.m3u8`,
-      lastSeekSeconds: timeline.lastSeekSeconds,
-      message: timeline.message,
-    }
-  }
-
-  private noteTimelineProgress(session: SessionRecord, progress: HlsProgress): void {
-    const segmentDurationSeconds = this.getRecoveryOptions().segmentDurationSeconds
-    const segmentNumbers = progress.segmentNames
-      .map(parseSegmentNumber)
-      .filter((segmentNumber): segmentNumber is number => segmentNumber !== null)
-
-    if (segmentNumbers.length === 0) {
-      return
-    }
-
-    for (const segmentNumber of segmentNumbers) {
-      session.timelineRuntime.generatedSegmentNumbers.add(segmentNumber)
-    }
-
-    const firstSegmentNumber = segmentNumbers[0]
-    const lastSegmentNumber = segmentNumbers.at(-1)
-    if (typeof firstSegmentNumber !== 'number' || typeof lastSegmentNumber !== 'number') {
-      return
-    }
-
-    session.timelineRuntime.currentRange = {
-      startSeconds: segmentStartSeconds(firstSegmentNumber, segmentDurationSeconds),
-      endSeconds: capDuration(
-        segmentEndSeconds(lastSegmentNumber, segmentDurationSeconds),
-        session.timelineRuntime.durationSeconds,
-      ),
-    }
-  }
-
   private getRecoveryOptions(): Required<PlaybackRecoveryOptions> {
     return {
       ...DEFAULT_RECOVERY_OPTIONS,
@@ -813,135 +752,6 @@ function createInitialRecoveryRuntime(enabled: boolean): PlaybackRecoveryRuntime
     epochInitialSegmentNumber: 1,
     badRanges: [],
   }
-}
-
-function createInitialTimelineRuntime(durationSeconds: number | undefined): PlaybackTimelineRuntime {
-  return {
-    durationSeconds,
-    status: 'idle',
-    currentRange: { startSeconds: 0, endSeconds: 0 },
-    generatedSegmentNumbers: new Set<number>(),
-  }
-}
-
-function normalizeSeekPosition(positionSeconds: number, durationSeconds: number | undefined, segmentDurationSeconds: number): number | null {
-  if (!Number.isFinite(positionSeconds) || positionSeconds < 0) {
-    return null
-  }
-
-  if (typeof durationSeconds === 'number' && positionSeconds > durationSeconds) {
-    return null
-  }
-
-  const alignedPositionSeconds = Math.floor(positionSeconds / segmentDurationSeconds) * segmentDurationSeconds
-  if (typeof durationSeconds === 'number') {
-    return Math.min(alignedPositionSeconds, Math.max(0, durationSeconds - segmentDurationSeconds))
-  }
-
-  return alignedPositionSeconds
-}
-
-function isTimeInRange(positionSeconds: number, range: PlaybackTimelineRange): boolean {
-  return positionSeconds >= range.startSeconds && positionSeconds < range.endSeconds
-}
-
-function segmentNumberForTime(positionSeconds: number, segmentDurationSeconds: number): number {
-  return Math.floor(positionSeconds / segmentDurationSeconds) + 1
-}
-
-function segmentStartSeconds(segmentNumber: number, segmentDurationSeconds: number): number {
-  return Math.max(0, segmentNumber - 1) * segmentDurationSeconds
-}
-
-function segmentEndSeconds(segmentNumber: number, segmentDurationSeconds: number): number {
-  return segmentNumber * segmentDurationSeconds
-}
-
-function capDuration(endSeconds: number, durationSeconds: number | undefined): number {
-  return typeof durationSeconds === 'number'
-    ? Math.min(endSeconds, durationSeconds)
-    : endSeconds
-}
-
-function rangesFromSegmentNumbers(
-  segmentNumbers: Set<number>,
-  segmentDurationSeconds: number,
-  durationSeconds: number | undefined,
-): PlaybackTimelineRange[] {
-  return segmentNumberRanges(segmentNumbers).map((range) => ({
-    startSeconds: segmentStartSeconds(range.startSegmentNumber, segmentDurationSeconds),
-    endSeconds: capDuration(segmentEndSeconds(range.endSegmentNumber, segmentDurationSeconds), durationSeconds),
-  }))
-}
-
-function buildStitchedManifest(session: SessionRecord, segmentDurationSeconds: number): string {
-  const segmentRanges = segmentNumberRanges(session.timelineRuntime.generatedSegmentNumbers)
-  const firstRange = segmentRanges[0]
-  const isComplete = isTimelineComplete(
-    segmentRanges,
-    segmentDurationSeconds,
-    session.timelineRuntime.durationSeconds,
-  )
-  const lines = [
-    '#EXTM3U',
-    '#EXT-X-VERSION:3',
-    `#EXT-X-TARGETDURATION:${Math.ceil(segmentDurationSeconds)}`,
-    ...(isComplete ? ['#EXT-X-PLAYLIST-TYPE:VOD'] : []),
-    `#EXT-X-MEDIA-SEQUENCE:${firstRange?.startSegmentNumber ?? 1}`,
-  ]
-
-  segmentRanges.forEach((range, index) => {
-    if (index > 0) {
-      lines.push('#EXT-X-DISCONTINUITY')
-    }
-
-    for (let segmentNumber = range.startSegmentNumber; segmentNumber <= range.endSegmentNumber; segmentNumber += 1) {
-      lines.push(`#EXTINF:${segmentDurationSeconds},`, formatSegmentName(segmentNumber))
-    }
-  })
-
-  if (isComplete) {
-    lines.push('#EXT-X-ENDLIST')
-  }
-
-  lines.push('')
-  return lines.join('\n')
-}
-
-function isTimelineComplete(
-  ranges: Array<{ startSegmentNumber: number; endSegmentNumber: number }>,
-  segmentDurationSeconds: number,
-  durationSeconds: number | undefined,
-): boolean {
-  if (typeof durationSeconds !== 'number' || ranges.length !== 1) {
-    return false
-  }
-
-  const [range] = ranges
-  return range !== undefined
-    && range.startSegmentNumber === 1
-    && segmentEndSeconds(range.endSegmentNumber, segmentDurationSeconds) >= durationSeconds
-}
-
-function segmentNumberRanges(segmentNumbers: Set<number>): Array<{ startSegmentNumber: number; endSegmentNumber: number }> {
-  const sorted = [...segmentNumbers].sort((left, right) => left - right)
-  const ranges: Array<{ startSegmentNumber: number; endSegmentNumber: number }> = []
-
-  for (const segmentNumber of sorted) {
-    const lastRange = ranges.at(-1)
-    if (!lastRange || segmentNumber > lastRange.endSegmentNumber + 1) {
-      ranges.push({ startSegmentNumber: segmentNumber, endSegmentNumber: segmentNumber })
-      continue
-    }
-
-    lastRange.endSegmentNumber = segmentNumber
-  }
-
-  return ranges
-}
-
-function formatSegmentName(segmentNumber: number): string {
-  return `segment-${String(segmentNumber).padStart(6, '0')}.ts`
 }
 
 function getSegmentNames(manifest: string): string[] {

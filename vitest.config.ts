@@ -2,6 +2,20 @@ import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
   test: {
+    coverage: {
+      provider: 'v8',
+      all: true,
+      include: ['src/**/*.ts'],
+      exclude: ['src/server.ts', 'src/**/*.d.ts', 'src/disc/types.ts'],
+      reporter: ['text', 'html', 'lcov'],
+      reportsDirectory: 'coverage',
+      thresholds: {
+        statements: 75,
+        branches: 60,
+        functions: 80,
+        lines: 75,
+      },
+    },
     projects: [
       {
         test: {

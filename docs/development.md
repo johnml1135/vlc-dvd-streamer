@@ -29,11 +29,12 @@ Run these before calling a change complete:
 ```powershell
 npm run typecheck
 npm test
+npm run test:coverage
 npm run build
 npm run test:e2e
 ```
 
-The Playwright suite starts the app with the fake VLC environment configured by `playwright.config.ts`.
+The coverage command writes text, HTML, and lcov reports under [../coverage](../coverage). The Playwright suite starts the app with the fake VLC environment configured by [../playwright.config.ts](../playwright.config.ts).
 
 ## Useful Scripts
 

@@ -12,6 +12,7 @@
     "install:windows": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/windows/install.ps1",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "test:e2e": "playwright test"
   },
@@ -24,6 +25,7 @@
   "devDependencies": {
     "@playwright/test": "^1.58.0",
     "@types/node": "^24.9.1",
+    "@vitest/coverage-v8": "^4.1.6",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3",
     "vitest": "^4.0.7"
