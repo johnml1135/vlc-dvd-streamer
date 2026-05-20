@@ -697,10 +697,18 @@ export class SessionManager {
 
   private publishRecoveryEvent(session: SessionRecord): void {
     session.recovery = this.toRecoverySnapshot(session.recoveryRuntime)
+    const playbackSession = this.toPlaybackSession(session)
     this.publishSessionEvent({
       type: 'session.recovery',
       payload: {
         sessionId: session.id,
+        session: {
+          id: playbackSession.id,
+          state: playbackSession.state,
+          manifestUrl: playbackSession.manifestUrl,
+          recovery: playbackSession.recovery,
+          timeline: playbackSession.timeline,
+        },
         ...session.recovery,
       },
     })

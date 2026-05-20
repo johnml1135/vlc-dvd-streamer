@@ -51,6 +51,7 @@ export async function registerStreamRoutes(app: FastifyInstance, context: AppCon
         queryFlag: videoOnly ? 'videoOnly' : undefined,
         recoveryEpoch: session.recovery?.epoch,
       })
+      reply.header('Cache-Control', 'no-cache, no-store, must-revalidate')
       reply.type('application/vnd.apple.mpegurl').send(content)
       return
     }
@@ -62,6 +63,7 @@ export async function registerStreamRoutes(app: FastifyInstance, context: AppCon
           queryFlag: videoOnly ? 'videoOnly' : undefined,
           recoveryEpoch: session.recovery?.epoch,
         })
+        reply.header('Cache-Control', 'no-cache, no-store, must-revalidate')
         reply.type('application/vnd.apple.mpegurl').send(content)
         return
       }

@@ -151,6 +151,7 @@ describe('app API', () => {
 
       const manifest = await app.inject({ method: 'GET', url: started.json().manifestUrl })
       expect(manifest.statusCode).toBe(200)
+      expect(manifest.headers['cache-control']).toBe('no-cache, no-store, must-revalidate')
       expect(manifest.body).toContain('#EXTM3U')
 
       const videoOnlyManifest = await app.inject({

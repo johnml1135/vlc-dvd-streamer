@@ -45,6 +45,7 @@ export function renderPlayerPage(input: PlayerPageInput): string {
   const durationSeconds = session.timeline?.durationSeconds ?? session.durationSeconds ?? 0
   const currentRange = session.timeline?.currentRange ?? { startSeconds: 0, endSeconds: 0 }
   const stitchedManifestUrl = session.timeline?.stitchedManifestUrl ?? session.manifestUrl.replace(/index\.m3u8(?:\?.*)?$/, 'stitched.m3u8')
+  const recoveryEpoch = session.recovery?.epoch ?? 0
 
   return renderLayout({
     title: 'Now Playing',
@@ -58,7 +59,7 @@ export function renderPlayerPage(input: PlayerPageInput): string {
           <p class="meta-label">Manifest URL</p>
           <a class="manifest-link" href="${escapeHtml(manifestUrl)}">${escapeHtml(manifestUrl)}</a>
         </div>
-        <video id="player" controls playsinline muted data-manifest-url="${escapeHtml(manifestUrl)}" data-session-id="${escapeHtml(session.id)}" data-duration-seconds="${durationSeconds}" data-epoch-start-seconds="${currentRange.startSeconds}"></video>
+        <video id="player" controls playsinline muted data-manifest-url="${escapeHtml(manifestUrl)}" data-session-id="${escapeHtml(session.id)}" data-duration-seconds="${durationSeconds}" data-epoch-start-seconds="${currentRange.startSeconds}" data-recovery-epoch="${recoveryEpoch}"></video>
         <p id="player-status" class="player-status">Attaching HLS stream...</p>
         <div class="title-timeline" data-stitched-manifest-url="${escapeHtml(stitchedManifestUrl)}">
           <div class="title-timeline-row">
@@ -91,6 +92,8 @@ export function renderPlayerPage(input: PlayerPageInput): string {
         let activeHls = null
         let nativeHlsActive = false
         let playbackManifestUrl = manifestUrl
+        let shouldResetPlaybackToZero = true
+        let activeRecoveryEpoch = video && video.dataset ? Number(video.dataset.recoveryEpoch || '0') : 0
 
         function appendStreamFlag(url, key) {
           if (url.indexOf(key + '=1') !== -1) {
@@ -156,6 +159,11 @@ export function renderPlayerPage(input: PlayerPageInput): string {
           }
         }
 
+        function recoveryEpochFromSession(session) {
+          const epoch = session && session.recovery ? Number(session.recovery.epoch) : NaN
+          return Number.isFinite(epoch) ? epoch : null
+        }
+
         function applySessionTimeline(session) {
           if (!session || !session.timeline) {
             return
@@ -167,6 +175,31 @@ export function renderPlayerPage(input: PlayerPageInput): string {
               video.dataset.epochStartSeconds = String(epochStartSeconds)
             }
           }
+
+          const recoveryEpoch = recoveryEpochFromSession(session)
+          if (recoveryEpoch !== null) {
+            activeRecoveryEpoch = recoveryEpoch
+            if (video && video.dataset) {
+              video.dataset.recoveryEpoch = String(activeRecoveryEpoch)
+            }
+          }
+
+          updateTimelineUi()
+        }
+
+        function syncRecoveredSession(payload) {
+          if (!payload || typeof payload !== 'object' || payload.sessionId !== sessionId || payload.status !== 'idle') {
+            return
+          }
+
+          const recoveredSession = payload.session
+          const recoveryEpoch = recoveryEpochFromSession(recoveredSession)
+          if (recoveryEpoch === null || recoveryEpoch <= activeRecoveryEpoch) {
+            return
+          }
+
+          applySessionTimeline(recoveredSession)
+          reloadPlaybackSource()
         }
 
         function seekWithinCurrentMedia(titleSeconds) {
@@ -183,6 +216,7 @@ export function renderPlayerPage(input: PlayerPageInput): string {
             return
           }
 
+          shouldResetPlaybackToZero = true
           const nextUrl = appendReloadToken(playbackManifestUrl)
           if (activeHls && typeof activeHls.loadSource === 'function') {
             activeHls.loadSource(nextUrl)
@@ -195,6 +229,19 @@ export function renderPlayerPage(input: PlayerPageInput): string {
           if (nativeHlsActive) {
             video.src = nextUrl
             video.load()
+          }
+        }
+
+        function resetPlaybackToWindowStart() {
+          if (!video || !shouldResetPlaybackToZero) {
+            return
+          }
+
+          try {
+            video.currentTime = 0
+            shouldResetPlaybackToZero = false
+            updateTimelineUi()
+          } catch {
           }
         }
 
@@ -253,6 +300,7 @@ export function renderPlayerPage(input: PlayerPageInput): string {
 
             if (!prefersNativeHls && Hls && typeof Hls.isSupported === 'function' && Hls.isSupported()) {
               const hls = new Hls({
+                startPosition: 0,
                 liveMaxUnchangedPlaylistRefresh: 3,
                 detectStallWithCurrentTimeMs: 1250,
                 highBufferWatchdogPeriod: 2,
@@ -269,6 +317,9 @@ export function renderPlayerPage(input: PlayerPageInput): string {
               })
               activeHls = hls
               let lastMediaRecoveryAt = 0
+              if (Hls.Events && Hls.Events.MANIFEST_PARSED) {
+                hls.on(Hls.Events.MANIFEST_PARSED, resetPlaybackToWindowStart)
+              }
               hls.on(Hls.Events.ERROR, (_event, data) => {
                 if (!data || !status) {
                   return
@@ -313,9 +364,14 @@ export function renderPlayerPage(input: PlayerPageInput): string {
         }
 
         void attachStream()
+        window.addEventListener('vlc-dvd-streamer:session-recovery', (event) => {
+          syncRecoveredSession(event.detail)
+        })
         if (video) {
           video.addEventListener('timeupdate', updateTimelineUi)
           video.addEventListener('progress', updateTimelineUi)
+          video.addEventListener('loadedmetadata', resetPlaybackToWindowStart)
+          video.addEventListener('playing', resetPlaybackToWindowStart)
         }
         if (seekControl) {
           seekControl.addEventListener('input', () => {
@@ -906,6 +962,7 @@ function renderLayout(input: {
               if (playerStatus && recoveryText) {
                 playerStatus.textContent = recoveryText
               }
+              window.dispatchEvent(new CustomEvent('vlc-dvd-streamer:session-recovery', { detail: event.payload }))
               return
             }
 

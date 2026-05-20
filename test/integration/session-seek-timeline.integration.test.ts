@@ -98,6 +98,73 @@ describe('SessionManager seek timeline', () => {
       await manager.stopAll()
     }
   })
+
+  it('restarts VLC and tracking state through consecutive multi-step seeks', async () => {
+    const cacheDir = await mkdtemp(join(tmpdir(), 'vlc-dvd-streamer-seek-multi-'))
+    const starts: StartHlsSessionInput[] = []
+    const handles: FakeHandle[] = []
+    const manager = new SessionManager({
+      cacheDir,
+      inactivityMs: 60_000,
+      playbackRecovery: { enabled: false, segmentDurationSeconds: 2 },
+      worker: {
+        async startHlsSession(input) {
+          starts.push(input)
+          await writeHlsWindow(input.outputDir, input.initialSegmentNumber ?? 1, 4)
+          const handle = new FakeHandle()
+          handles.push(handle)
+          return { manifestPath: join(input.outputDir, 'index.m3u8'), handle }
+        },
+      },
+    })
+
+    try {
+      const session = await manager.start({
+        discId: 'disc-001',
+        drive: 'D:',
+        titleNumber: 1,
+        durationSeconds: 120,
+      })
+
+      // Step 1: seek to 20
+      const result1 = await manager.seek(session.id, { positionSeconds: 20 })
+      expect(result1).toMatchObject({ ok: true, action: 'restarted' })
+
+      // Step 2: seek to 40
+      const result2 = await manager.seek(session.id, { positionSeconds: 40 })
+      expect(result2).toMatchObject({ ok: true, action: 'restarted' })
+
+      // Step 3: seek to 60
+      const result3 = await manager.seek(session.id, { positionSeconds: 60 })
+      expect(result3).toMatchObject({ ok: true, action: 'restarted' })
+
+      expect(starts).toHaveLength(4)
+      expect(starts[3]).toMatchObject({
+        startTimeSeconds: 60,
+        initialSegmentNumber: 31,
+      })
+
+      expect(manager.getSession(session.id)?.timeline).toMatchObject({
+        durationSeconds: 120,
+        currentRange: { startSeconds: 60, endSeconds: 68 },
+        generatedRanges: [
+          { startSeconds: 0, endSeconds: 8 },
+          { startSeconds: 20, endSeconds: 28 },
+          { startSeconds: 40, endSeconds: 48 },
+          { startSeconds: 60, endSeconds: 68 },
+        ],
+      })
+
+      const stitchedManifest = manager.getStitchedManifest(session.id)
+      expect(stitchedManifest).toContain('segment-000001.ts')
+      expect(stitchedManifest).toContain('#EXT-X-DISCONTINUITY')
+      expect(stitchedManifest).toContain('segment-000011.ts')
+      expect(stitchedManifest).toContain('segment-000021.ts')
+      expect(stitchedManifest).toContain('segment-000031.ts')
+    } finally {
+      await manager.stopAll()
+    }
+  })
 })
 
 class FakeHandle implements ManagedProcessHandle {

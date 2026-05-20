@@ -63,7 +63,19 @@ describe('SessionManager bad-sector recovery', () => {
         startSeconds: 2,
         endSeconds: 12,
       })
-      expect(events.some((event) => event.type === 'session.recovery')).toBe(true)
+      const recoveredEvent = events.find((event) => {
+        const payload = event.payload as { status?: string; epoch?: number } | undefined
+        return event.type === 'session.recovery' && payload?.status === 'idle' && payload.epoch === 1
+      })
+      expect(recoveredEvent?.payload).toMatchObject({
+        session: {
+          id: session.id,
+          timeline: {
+            currentRange: { startSeconds: 12 },
+          },
+        },
+      })
+      expect(recoveredEvent?.payload).not.toHaveProperty('session.outputDir')
       await access(join(recovered?.outputDir ?? '', 'segment-000007.ts'))
     } finally {
       await manager.stopAll()
