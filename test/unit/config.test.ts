@@ -10,9 +10,10 @@ describe('loadConfig', () => {
     expect(config.cacheDir).toBe('.cache')
     expect(config.vlcCandidates.length).toBeGreaterThan(0)
     expect(config.sessionReadinessTimeoutMs).toBe(120000)
-    expect(config.sessionRecoveryStallMs).toBe(12000)
+    expect(config.sessionRecoveryStallMs).toBe(10000)
     expect(config.sessionRecoveryRestartReadinessMs).toBe(30000)
     expect(config.sessionRecoverySkipSeconds).toBe(10)
+    expect(config.sessionRecoveryReadRetries).toBe(3)
     expect(config.sessionRecoveryMaxAttempts).toBe(6)
   })
 
@@ -22,6 +23,7 @@ describe('loadConfig', () => {
       SESSION_RECOVERY_STALL_MS: '9000',
       SESSION_RECOVERY_RESTART_READINESS_MS: '45000',
       SESSION_RECOVERY_SKIP_SECONDS: '15',
+      SESSION_RECOVERY_READ_RETRIES: '5',
       SESSION_RECOVERY_MAX_ATTEMPTS: '4',
     })
 
@@ -29,6 +31,7 @@ describe('loadConfig', () => {
     expect(config.sessionRecoveryStallMs).toBe(9000)
     expect(config.sessionRecoveryRestartReadinessMs).toBe(45000)
     expect(config.sessionRecoverySkipSeconds).toBe(15)
+    expect(config.sessionRecoveryReadRetries).toBe(5)
     expect(config.sessionRecoveryMaxAttempts).toBe(4)
   })
 
@@ -37,5 +40,6 @@ describe('loadConfig', () => {
     expect(() => loadConfig({ VLC_TIMEOUT_MS: '-1000' })).toThrow(/VLC_TIMEOUT_MS/i)
     expect(() => loadConfig({ SESSION_READINESS_TIMEOUT_MS: '12.5' })).toThrow(/SESSION_READINESS_TIMEOUT_MS/i)
     expect(() => loadConfig({ SESSION_RECOVERY_SKIP_SECONDS: '0' })).toThrow(/SESSION_RECOVERY_SKIP_SECONDS/i)
+    expect(() => loadConfig({ SESSION_RECOVERY_READ_RETRIES: '0' })).toThrow(/SESSION_RECOVERY_READ_RETRIES/i)
   })
 })

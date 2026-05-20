@@ -86,17 +86,19 @@ If playback stalls, the server:
 
 1. treats the stall as a possible unreadable DVD area
 2. stops the stuck VLC process
-3. restarts the same title about 10 seconds farther ahead
-4. marks the HLS discontinuity
-5. tells the browser to wait for recovered stream data
+3. retries the same title from the last good time a few times
+4. restarts the same title about 10 seconds farther ahead if the retries keep stalling
+5. marks the HLS discontinuity
+6. tells the browser to wait for recovered stream data
 
-The goal is simple: no indefinite freeze, no crash, and the browser sees playback resume after the skipped range.
+The goal is simple: give the disc a few chances to read through a rough spot, avoid an indefinite freeze, and let the browser resume after a skipped range only when retries fail. If you manually seek back before a previously skipped area, the server starts a fresh retry sequence instead of treating the earlier skip as permanent.
 
 Recovery knobs are available if you need to experiment with a difficult disc:
 
-- `SESSION_RECOVERY_STALL_MS` defaults to `12000`.
+- `SESSION_RECOVERY_STALL_MS` defaults to `10000`.
 - `SESSION_RECOVERY_RESTART_READINESS_MS` defaults to `30000`.
 - `SESSION_RECOVERY_SKIP_SECONDS` defaults to `10`.
+- `SESSION_RECOVERY_READ_RETRIES` defaults to `3`.
 - `SESSION_RECOVERY_MAX_ATTEMPTS` defaults to `6`.
 
 ## Run It Manually 🚀

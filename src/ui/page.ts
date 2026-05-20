@@ -900,6 +900,10 @@ function renderLayout(input: {
             return ''
           }
 
+          if (typeof payload.message === 'string' && payload.message.length > 0) {
+            return payload.message
+          }
+
           if (payload.status === 'recovering') {
             return 'Unreadable DVD area detected. Skipping ahead while the server rebuilds the stream.'
           }

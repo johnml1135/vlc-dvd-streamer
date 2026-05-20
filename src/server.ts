@@ -67,9 +67,10 @@ const sessionManager = new SessionManager({
   inactivityMs: config.inactiveSessionMs ?? 900000,
   readinessTimeoutMs: config.sessionReadinessTimeoutMs ?? 120000,
   playbackRecovery: {
-    stallTimeoutMs: config.sessionRecoveryStallMs ?? 12000,
+    stallTimeoutMs: config.sessionRecoveryStallMs ?? 10000,
     restartReadinessTimeoutMs: config.sessionRecoveryRestartReadinessMs ?? 30000,
     skipSeconds: config.sessionRecoverySkipSeconds ?? 10,
+    readRetryAttempts: config.sessionRecoveryReadRetries ?? 3,
     maxAttempts: config.sessionRecoveryMaxAttempts ?? 6,
   },
   onSessionEvent: (event) => eventHub.publish(event),

@@ -93,12 +93,14 @@ export interface PlaybackRecoveryOptions {
   restartReadinessTimeoutMs?: number
   stopTimeoutMs?: number
   skipSeconds?: number
+  readRetryAttempts?: number
   maxAttempts?: number
   segmentDurationSeconds?: number
 }
 
 interface PlaybackRecoveryRuntime extends PlaybackRecoverySnapshot {
   consecutiveAttempts: number
+  readRetryAttempts: number
   epochStartTimeSeconds: number
   epochInitialSegmentNumber: number | null
   lastProgressAtMs: number | null
@@ -132,11 +134,12 @@ export interface SessionManagerOptions {
 
 const DEFAULT_RECOVERY_OPTIONS = {
   enabled: true,
-  stallTimeoutMs: 12000,
+  stallTimeoutMs: 10000,
   monitorIntervalMs: 1000,
   restartReadinessTimeoutMs: 30000,
   stopTimeoutMs: 5000,
   skipSeconds: 10,
+  readRetryAttempts: 3,
   maxAttempts: 6,
   segmentDurationSeconds: 2,
 } satisfies Required<PlaybackRecoveryOptions>
@@ -216,6 +219,7 @@ export class SessionManager {
     }
 
     this.clearRecoveryMonitor(session)
+  this.resetRecoveryRetryPolicy(session)
     const previousSegmentName = session.recoveryRuntime.lastSegmentName
     const initialSegmentNumber = segmentNumberForTime(positionSeconds, recoveryOptions.segmentDurationSeconds)
 
@@ -519,6 +523,7 @@ export class SessionManager {
       if (session.recoveryRuntime.status === 'recovering') {
         session.recoveryRuntime.status = 'idle'
         session.recoveryRuntime.consecutiveAttempts = 0
+        session.recoveryRuntime.readRetryAttempts = 0
         session.recoveryRuntime.message = `Recovered playback after skipping ${recoveryOptions.skipSeconds} seconds.`
         this.publishRecoveryEvent(session)
       }
@@ -536,27 +541,37 @@ export class SessionManager {
 
   private async recoverStalledPlayback(session: SessionRecord): Promise<void> {
     const recoveryOptions = this.getRecoveryOptions()
-    const nextAttempt = session.recoveryRuntime.consecutiveAttempts + 1
-    if (nextAttempt > recoveryOptions.maxAttempts) {
+    const previousSegmentName = session.recoveryRuntime.lastSegmentName
+    const previousLastGoodTimeSeconds = session.recoveryRuntime.lastGoodTimeSeconds
+    const nextReadRetryAttempt = session.recoveryRuntime.readRetryAttempts + 1
+    const shouldRetryRead = nextReadRetryAttempt <= recoveryOptions.readRetryAttempts
+    const nextSkipAttempt = session.recoveryRuntime.consecutiveAttempts + 1
+
+    if (!shouldRetryRead && nextSkipAttempt > recoveryOptions.maxAttempts) {
       await this.exhaustRecovery(session)
       return
     }
 
-    const previousSegmentName = session.recoveryRuntime.lastSegmentName
-    const previousLastGoodTimeSeconds = session.recoveryRuntime.lastGoodTimeSeconds
-    const resumeTimeSeconds = previousLastGoodTimeSeconds + recoveryOptions.skipSeconds * nextAttempt
+    const resumeTimeSeconds = shouldRetryRead
+      ? previousLastGoodTimeSeconds
+      : previousLastGoodTimeSeconds + recoveryOptions.skipSeconds
     const initialSegmentNumber = segmentNumberForTime(resumeTimeSeconds, recoveryOptions.segmentDurationSeconds)
 
     session.recoveryRuntime.status = 'recovering'
     session.recoveryRuntime.attempts += 1
-    session.recoveryRuntime.consecutiveAttempts = nextAttempt
-    session.recoveryRuntime.skippedSeconds += recoveryOptions.skipSeconds
-    session.recoveryRuntime.message = `Unreadable DVD area detected. Skipping ahead to ${resumeTimeSeconds} seconds.`
-    session.recoveryRuntime.badRanges.push({
-      startSeconds: previousLastGoodTimeSeconds,
-      endSeconds: resumeTimeSeconds,
-      reason: 'dvd-read-stall',
-    })
+    if (shouldRetryRead) {
+      session.recoveryRuntime.readRetryAttempts = nextReadRetryAttempt
+      session.recoveryRuntime.message = `DVD read stalled near ${previousLastGoodTimeSeconds} seconds. Retrying read ${nextReadRetryAttempt} of ${recoveryOptions.readRetryAttempts}.`
+    } else {
+      session.recoveryRuntime.consecutiveAttempts = nextSkipAttempt
+      session.recoveryRuntime.skippedSeconds += recoveryOptions.skipSeconds
+      session.recoveryRuntime.message = `Unreadable DVD area persisted after ${recoveryOptions.readRetryAttempts} retries. Skipping ahead to ${resumeTimeSeconds} seconds.`
+      session.recoveryRuntime.badRanges.push({
+        startSeconds: previousLastGoodTimeSeconds,
+        endSeconds: resumeTimeSeconds,
+        reason: 'dvd-read-stall',
+      })
+    }
     this.publishRecoveryEvent(session)
     this.options.logger?.warn('session', `Session ${session.id} stalled near ${previousLastGoodTimeSeconds}s; restarting VLC at ${resumeTimeSeconds}s.`)
 
@@ -582,8 +597,13 @@ export class SessionManager {
       const progress = await this.waitForRecoveryReadiness(session, previousSegmentName)
       this.notePlaybackProgress(session, progress, Date.now())
       session.recoveryRuntime.status = 'idle'
-      session.recoveryRuntime.consecutiveAttempts = 0
-      session.recoveryRuntime.message = `Skipped ${resumeTimeSeconds - previousLastGoodTimeSeconds} seconds and resumed playback.`
+      if (shouldRetryRead) {
+        session.recoveryRuntime.message = `Retried DVD read at ${resumeTimeSeconds} seconds.`
+      } else {
+        session.recoveryRuntime.consecutiveAttempts = 0
+        session.recoveryRuntime.readRetryAttempts = 0
+        session.recoveryRuntime.message = `Skipped ${resumeTimeSeconds - previousLastGoodTimeSeconds} seconds and resumed playback.`
+      }
       this.publishRecoveryEvent(session)
     } catch (error) {
       session.recoveryRuntime.message = `Recovery attempt did not produce HLS output: ${formatError(error)}`
@@ -661,6 +681,10 @@ export class SessionManager {
     const recoveryOptions = this.getRecoveryOptions()
     const runtime = session.recoveryRuntime
     noteTimelineProgress(session.timelineRuntime, progress.segmentNames, recoveryOptions.segmentDurationSeconds)
+    if (runtime.status !== 'recovering') {
+      runtime.consecutiveAttempts = 0
+      runtime.readRetryAttempts = 0
+    }
     runtime.lastSegmentName = progress.lastSegmentName
     runtime.lastSegmentNumber = progress.lastSegmentNumber
     runtime.lastProgressAtMs = nowMs
@@ -718,6 +742,11 @@ export class SessionManager {
     this.options.onSessionEvent?.(event)
   }
 
+  private resetRecoveryRetryPolicy(session: SessionRecord): void {
+    session.recoveryRuntime.consecutiveAttempts = 0
+    session.recoveryRuntime.readRetryAttempts = 0
+  }
+
   private toRecoverySnapshot(runtime: PlaybackRecoveryRuntime): PlaybackRecoverySnapshot {
     return {
       enabled: runtime.enabled,
@@ -751,6 +780,7 @@ function createInitialRecoveryRuntime(enabled: boolean): PlaybackRecoveryRuntime
     status: 'idle',
     attempts: 0,
     consecutiveAttempts: 0,
+    readRetryAttempts: 0,
     epoch: 0,
     skippedSeconds: 0,
     lastGoodTimeSeconds: 0,

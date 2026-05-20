@@ -41,6 +41,7 @@ describe('renderPlayerPage', () => {
     expect(html).toContain("data-recovery-epoch=\"0\"")
     expect(html).toContain("'vlc-dvd-streamer:session-recovery'")
     expect(html).toContain('syncRecoveredSession')
+    expect(html).toContain("typeof payload.message === 'string'")
     expect(html).toContain('Unreadable DVD area detected')
     expect(html).toContain('recoverMediaError')
     expect(html).toContain('Hls.Events.MANIFEST_PARSED')

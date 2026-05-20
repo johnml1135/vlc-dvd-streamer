@@ -11,6 +11,7 @@ export interface AppConfig {
   sessionRecoveryStallMs?: number
   sessionRecoveryRestartReadinessMs?: number
   sessionRecoverySkipSeconds?: number
+  sessionRecoveryReadRetries?: number
   sessionRecoveryMaxAttempts?: number
   vlcShimScript?: string
   vlcTrackMetadataScript?: string
@@ -33,9 +34,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     inactiveSessionMs: parsePositiveIntegerEnv(env.INACTIVE_SESSION_MS, 'INACTIVE_SESSION_MS', 900000),
     vlcTimeoutMs: parsePositiveIntegerEnv(env.VLC_TIMEOUT_MS, 'VLC_TIMEOUT_MS', 30000),
     sessionReadinessTimeoutMs: parsePositiveIntegerEnv(env.SESSION_READINESS_TIMEOUT_MS, 'SESSION_READINESS_TIMEOUT_MS', 120000),
-    sessionRecoveryStallMs: parsePositiveIntegerEnv(env.SESSION_RECOVERY_STALL_MS, 'SESSION_RECOVERY_STALL_MS', 12000),
+    sessionRecoveryStallMs: parsePositiveIntegerEnv(env.SESSION_RECOVERY_STALL_MS, 'SESSION_RECOVERY_STALL_MS', 10000),
     sessionRecoveryRestartReadinessMs: parsePositiveIntegerEnv(env.SESSION_RECOVERY_RESTART_READINESS_MS, 'SESSION_RECOVERY_RESTART_READINESS_MS', 30000),
     sessionRecoverySkipSeconds: parsePositiveIntegerEnv(env.SESSION_RECOVERY_SKIP_SECONDS, 'SESSION_RECOVERY_SKIP_SECONDS', 10),
+    sessionRecoveryReadRetries: parsePositiveIntegerEnv(env.SESSION_RECOVERY_READ_RETRIES, 'SESSION_RECOVERY_READ_RETRIES', 3),
     sessionRecoveryMaxAttempts: parsePositiveIntegerEnv(env.SESSION_RECOVERY_MAX_ATTEMPTS, 'SESSION_RECOVERY_MAX_ATTEMPTS', 6),
     vlcShimScript: env.VLC_SHIM_SCRIPT,
     vlcTrackMetadataScript: env.VLC_TRACK_METADATA_SCRIPT,
