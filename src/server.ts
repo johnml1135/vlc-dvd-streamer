@@ -3,6 +3,7 @@ import { mkdir } from 'node:fs/promises'
 import { buildApp } from './app.js'
 import { loadConfig } from './config.js'
 import { CatalogService } from './disc/catalog-service.js'
+import { detectOpticalDrive } from './disc/optical-drive.js'
 import { EventHub } from './events/event-hub.js'
 import { ServerLog } from './logging/server-log.js'
 import { SessionManager } from './session/session-manager.js'
@@ -27,7 +28,22 @@ const serverLog = new ServerLog(eventHub, 200, (line, entry) => {
   console.log(line)
 })
 
-serverLog.info('server', `Bootstrapping DVD Streamer with host=${config.host}, port=${config.port}, drive=${config.drive ?? 'D:'}, cacheDir=${config.cacheDir}.`)
+// Resolve the optical drive: an explicit DVD_DRIVE always wins; otherwise
+// auto-detect the Windows optical drive (preferring one with a disc loaded) so
+// the app does not silently probe the wrong letter.
+const explicitDrive = process.env.DVD_DRIVE?.trim()
+let resolvedDrive = explicitDrive || config.drive || 'D:'
+if (!explicitDrive) {
+  const detectedDrive = await detectOpticalDrive()
+  if (detectedDrive) {
+    resolvedDrive = detectedDrive
+    serverLog.info('server', `Auto-detected optical drive ${detectedDrive}.`)
+  } else {
+    serverLog.warn('server', `Could not auto-detect an optical drive; using ${resolvedDrive}. Set DVD_DRIVE to override.`)
+  }
+}
+
+serverLog.info('server', `Bootstrapping DVD Streamer with host=${config.host}, port=${config.port}, drive=${resolvedDrive}, cacheDir=${config.cacheDir}.`)
 
 const resolvedVlc = await findVlc(config.vlcCandidates)
 serverLog.info(
@@ -45,7 +61,7 @@ const defaultTrackMetadataScript = !config.vlcShimScript
 
 const worker = new VlcWorker({
   executable: resolvedVlc.path ?? config.vlcCandidates[0] ?? process.execPath,
-  drive: config.drive ?? 'D:',
+  drive: resolvedDrive,
   timeoutMs: config.vlcTimeoutMs ?? 30000,
   shimScript: config.vlcShimScript,
   trackMetadataScript: defaultTrackMetadataScript,
@@ -53,7 +69,7 @@ const worker = new VlcWorker({
 })
 const catalogService = new CatalogService({
   cacheDir: config.cacheDir,
-  drive: config.drive ?? 'D:',
+  drive: resolvedDrive,
   minVisibleTitleDurationSeconds: config.minVisibleTitleDurationSeconds ?? 300,
   worker,
   logger: serverLog,
@@ -82,7 +98,7 @@ const cleanupTimer = setInterval(() => {
   void sessionManager.cleanupInactive()
 }, 30000)
 
-serverLog.info('server', `Starting DVD Streamer on ${config.host}:${config.port} using drive ${config.drive ?? 'D:'}.`)
+serverLog.info('server', `Starting DVD Streamer on ${config.host}:${config.port} using drive ${resolvedDrive}.`)
 
 const app = await buildApp({
   config,

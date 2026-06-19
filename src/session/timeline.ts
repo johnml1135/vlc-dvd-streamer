@@ -5,6 +5,24 @@ export interface PlaybackTimelineRange {
 
 export type PlaybackTimelineStatus = 'idle' | 'seeking'
 
+export type SlotSource = 'generated' | 'bad'
+
+/**
+ * The DVD title is modelled as a fixed grid of fixed-length slots. Slot K
+ * (1-indexed) always represents DVD time [(K-1) * segmentDurationSeconds,
+ * K * segmentDurationSeconds). Because the slot index is a pure function of DVD
+ * time, the timeline stays accurate no matter how many times VLC is restarted
+ * for seeks or bad-sector recovery. Unreadable slots are filled with a
+ * placeholder rather than collapsing the timeline.
+ */
+const BAD_SLOT_GROUP = -1
+
+interface SlotInfo {
+  source: SlotSource
+  /** Discontinuity group: the VLC epoch that produced a generated slot, or BAD_SLOT_GROUP. */
+  group: number
+}
+
 export interface PlaybackTimelineSnapshot {
   durationSeconds?: number
   status: PlaybackTimelineStatus
@@ -17,23 +35,48 @@ export interface PlaybackTimelineSnapshot {
 
 export interface PlaybackTimelineRuntime {
   durationSeconds?: number
+  segmentDurationSeconds: number
   status: PlaybackTimelineStatus
-  currentRange: PlaybackTimelineRange
-  generatedSegmentNumbers: Set<number>
+  /** First slot of the current contiguous playback region; only a user seek moves it. */
+  regionStartSlot: number
+  slots: Map<number, SlotInfo>
   lastSeekSeconds?: number
   message?: string
 }
 
-export function createInitialTimelineRuntime(durationSeconds: number | undefined): PlaybackTimelineRuntime {
+export function createInitialTimelineRuntime(
+  durationSeconds: number | undefined,
+  segmentDurationSeconds: number,
+): PlaybackTimelineRuntime {
   return {
     durationSeconds,
+    segmentDurationSeconds,
     status: 'idle',
-    currentRange: { startSeconds: 0, endSeconds: 0 },
-    generatedSegmentNumbers: new Set<number>(),
+    regionStartSlot: 1,
+    slots: new Map<number, SlotInfo>(),
   }
 }
 
-export function normalizeSeekPosition(positionSeconds: number, durationSeconds: number | undefined, segmentDurationSeconds: number): number | null {
+export function slotForTime(positionSeconds: number, segmentDurationSeconds: number): number {
+  return Math.floor(positionSeconds / segmentDurationSeconds) + 1
+}
+
+/** Retained alias: the slot index and the HLS segment number are the same value. */
+export const segmentNumberForTime = slotForTime
+
+export function slotStartSeconds(slotNumber: number, segmentDurationSeconds: number): number {
+  return Math.max(0, slotNumber - 1) * segmentDurationSeconds
+}
+
+export function slotEndSeconds(slotNumber: number, segmentDurationSeconds: number): number {
+  return slotNumber * segmentDurationSeconds
+}
+
+export function normalizeSeekPosition(
+  positionSeconds: number,
+  durationSeconds: number | undefined,
+  segmentDurationSeconds: number,
+): number | null {
   if (!Number.isFinite(positionSeconds) || positionSeconds < 0) {
     return null
   }
@@ -54,73 +97,130 @@ export function isTimeInRange(positionSeconds: number, range: PlaybackTimelineRa
   return positionSeconds >= range.startSeconds && positionSeconds < range.endSeconds
 }
 
-export function segmentNumberForTime(positionSeconds: number, segmentDurationSeconds: number): number {
-  return Math.floor(positionSeconds / segmentDurationSeconds) + 1
+export function setRegionStart(runtime: PlaybackTimelineRuntime, slotNumber: number): void {
+  runtime.regionStartSlot = Math.max(1, Math.floor(slotNumber))
 }
 
-export function noteTimelineProgress(runtime: PlaybackTimelineRuntime, segmentNames: string[], segmentDurationSeconds: number): void {
-  const segmentNumbers = segmentNames
-    .map(parseSegmentNumber)
-    .filter((segmentNumber): segmentNumber is number => segmentNumber !== null)
-
-  if (segmentNumbers.length === 0) {
-    return
-  }
-
-  for (const segmentNumber of segmentNumbers) {
-    runtime.generatedSegmentNumbers.add(segmentNumber)
-  }
-
-  const firstSegmentNumber = segmentNumbers[0]
-  const lastSegmentNumber = segmentNumbers.at(-1)
-  if (typeof firstSegmentNumber !== 'number' || typeof lastSegmentNumber !== 'number') {
-    return
-  }
-
-  runtime.currentRange = {
-    startSeconds: segmentStartSeconds(firstSegmentNumber, segmentDurationSeconds),
-    endSeconds: capDuration(
-      segmentEndSeconds(lastSegmentNumber, segmentDurationSeconds),
-      runtime.durationSeconds,
-    ),
+export function noteGeneratedSlots(runtime: PlaybackTimelineRuntime, segmentNames: string[], group: number): void {
+  for (const segmentName of segmentNames) {
+    const slotNumber = parseSegmentNumber(segmentName)
+    if (slotNumber !== null) {
+      runtime.slots.set(slotNumber, { source: 'generated', group })
+    }
   }
 }
 
-export function toTimelineSnapshot(runtime: PlaybackTimelineRuntime, baseUrl: string, segmentDurationSeconds: number): PlaybackTimelineSnapshot {
+export function markBadSlot(runtime: PlaybackTimelineRuntime, slotNumber: number): void {
+  if (Number.isInteger(slotNumber) && slotNumber >= 1) {
+    runtime.slots.set(slotNumber, { source: 'bad', group: BAD_SLOT_GROUP })
+  }
+}
+
+/** Slots of the current contiguous region, starting at regionStartSlot. */
+function regionSlots(runtime: PlaybackTimelineRuntime): number[] {
+  const slots: number[] = []
+  let slotNumber = runtime.regionStartSlot
+  while (runtime.slots.has(slotNumber)) {
+    slots.push(slotNumber)
+    slotNumber += 1
+  }
+
+  return slots
+}
+
+function currentRange(runtime: PlaybackTimelineRuntime): PlaybackTimelineRange {
+  const slots = regionSlots(runtime)
+  const startSeconds = slotStartSeconds(runtime.regionStartSlot, runtime.segmentDurationSeconds)
+  const lastSlot = slots.at(-1)
+  if (lastSlot === undefined) {
+    return { startSeconds, endSeconds: startSeconds }
+  }
+
+  return {
+    startSeconds,
+    endSeconds: capDuration(slotEndSeconds(lastSlot, runtime.segmentDurationSeconds), runtime.durationSeconds),
+  }
+}
+
+/** The contiguous DVD-time range currently buffered for the active region. */
+export function getCurrentRange(runtime: PlaybackTimelineRuntime): PlaybackTimelineRange {
+  return currentRange(runtime)
+}
+
+/** The next slot the live edge expects VLC to produce (or fill) for the region. */
+export function nextExpectedSlot(runtime: PlaybackTimelineRuntime): number {
+  return slotForTime(currentRange(runtime).endSeconds, runtime.segmentDurationSeconds)
+}
+
+export function toTimelineSnapshot(
+  runtime: PlaybackTimelineRuntime,
+  baseUrl: string,
+  segmentDurationSeconds: number,
+): PlaybackTimelineSnapshot {
   return {
     durationSeconds: runtime.durationSeconds,
     status: runtime.status,
-    currentRange: { ...runtime.currentRange },
-    generatedRanges: rangesFromSegmentNumbers(runtime.generatedSegmentNumbers, segmentDurationSeconds, runtime.durationSeconds),
+    currentRange: currentRange(runtime),
+    generatedRanges: rangesFromSlots(runtime, segmentDurationSeconds, 'generated'),
     stitchedManifestUrl: `${baseUrl}stitched.m3u8`,
     lastSeekSeconds: runtime.lastSeekSeconds,
     message: runtime.message,
   }
 }
 
+/** Manifest the browser plays: the contiguous region from regionStartSlot, placeholders inline. */
+export function buildRegionManifest(runtime: PlaybackTimelineRuntime, segmentDurationSeconds: number): string {
+  const slots = regionSlots(runtime)
+  const lastSlot = slots.at(-1)
+  const total = totalSlots(runtime)
+  const complete = total !== null && lastSlot !== undefined && lastSlot >= total
+  return buildManifest(slots, runtime, segmentDurationSeconds, {
+    mediaSequence: runtime.regionStartSlot,
+    playlistType: complete ? 'VOD' : 'EVENT',
+    endlist: complete,
+  })
+}
+
+/** Whole-title cache view: every known slot, joined with discontinuities across gaps. */
 export function buildStitchedManifest(runtime: PlaybackTimelineRuntime, segmentDurationSeconds: number): string {
-  const segmentRanges = segmentNumberRanges(runtime.generatedSegmentNumbers)
-  const firstRange = segmentRanges[0]
-  const isComplete = isTimelineComplete(segmentRanges, segmentDurationSeconds, runtime.durationSeconds)
+  const slots = [...runtime.slots.keys()].sort((left, right) => left - right)
+  const total = totalSlots(runtime)
+  const complete = total !== null && slots.length === total && slots[0] === 1 && slots.at(-1) === total
+  return buildManifest(slots, runtime, segmentDurationSeconds, {
+    mediaSequence: slots[0] ?? 1,
+    playlistType: complete ? 'VOD' : undefined,
+    endlist: complete,
+  })
+}
+
+function buildManifest(
+  slots: number[],
+  runtime: PlaybackTimelineRuntime,
+  segmentDurationSeconds: number,
+  options: { mediaSequence: number; playlistType?: 'VOD' | 'EVENT'; endlist: boolean },
+): string {
   const lines = [
     '#EXTM3U',
     '#EXT-X-VERSION:3',
     `#EXT-X-TARGETDURATION:${Math.ceil(segmentDurationSeconds)}`,
-    ...(isComplete ? ['#EXT-X-PLAYLIST-TYPE:VOD'] : []),
-    `#EXT-X-MEDIA-SEQUENCE:${firstRange?.startSegmentNumber ?? 1}`,
+    ...(options.playlistType ? [`#EXT-X-PLAYLIST-TYPE:${options.playlistType}`] : []),
+    `#EXT-X-MEDIA-SEQUENCE:${options.mediaSequence}`,
   ]
 
-  segmentRanges.forEach((range, index) => {
-    if (index > 0) {
-      lines.push('#EXT-X-DISCONTINUITY')
+  slots.forEach((slotNumber, index) => {
+    const previousSlot = slots[index - 1]
+    if (index > 0 && previousSlot !== undefined) {
+      const gap = slotNumber !== previousSlot + 1
+      const groupChanged = groupOf(runtime, slotNumber) !== groupOf(runtime, previousSlot)
+      if (gap || groupChanged) {
+        lines.push('#EXT-X-DISCONTINUITY')
+      }
     }
 
-    for (let segmentNumber = range.startSegmentNumber; segmentNumber <= range.endSegmentNumber; segmentNumber += 1) {
-      lines.push(`#EXTINF:${segmentDurationSeconds},`, formatSegmentName(segmentNumber))
-    }
+    lines.push(`#EXTINF:${segmentDurationSeconds},`, formatSegmentName(slotNumber))
   })
 
-  if (isComplete) {
+  if (options.endlist) {
     lines.push('#EXT-X-ENDLIST')
   }
 
@@ -128,65 +228,50 @@ export function buildStitchedManifest(runtime: PlaybackTimelineRuntime, segmentD
   return lines.join('\n')
 }
 
-function segmentStartSeconds(segmentNumber: number, segmentDurationSeconds: number): number {
-  return Math.max(0, segmentNumber - 1) * segmentDurationSeconds
+function groupOf(runtime: PlaybackTimelineRuntime, slotNumber: number): number {
+  return runtime.slots.get(slotNumber)?.group ?? BAD_SLOT_GROUP
 }
 
-function segmentEndSeconds(segmentNumber: number, segmentDurationSeconds: number): number {
-  return segmentNumber * segmentDurationSeconds
+function totalSlots(runtime: PlaybackTimelineRuntime): number | null {
+  if (typeof runtime.durationSeconds !== 'number' || runtime.durationSeconds <= 0) {
+    return null
+  }
+
+  return Math.ceil(runtime.durationSeconds / runtime.segmentDurationSeconds)
 }
 
 function capDuration(endSeconds: number, durationSeconds: number | undefined): number {
-  return typeof durationSeconds === 'number'
-    ? Math.min(endSeconds, durationSeconds)
-    : endSeconds
+  return typeof durationSeconds === 'number' ? Math.min(endSeconds, durationSeconds) : endSeconds
 }
 
-function rangesFromSegmentNumbers(
-  segmentNumbers: Set<number>,
+function rangesFromSlots(
+  runtime: PlaybackTimelineRuntime,
   segmentDurationSeconds: number,
-  durationSeconds: number | undefined,
+  source: SlotSource,
 ): PlaybackTimelineRange[] {
-  return segmentNumberRanges(segmentNumbers).map((range) => ({
-    startSeconds: segmentStartSeconds(range.startSegmentNumber, segmentDurationSeconds),
-    endSeconds: capDuration(segmentEndSeconds(range.endSegmentNumber, segmentDurationSeconds), durationSeconds),
-  }))
-}
+  const slots = [...runtime.slots.entries()]
+    .filter(([, info]) => info.source === source)
+    .map(([slotNumber]) => slotNumber)
+    .sort((left, right) => left - right)
 
-function isTimelineComplete(
-  ranges: Array<{ startSegmentNumber: number; endSegmentNumber: number }>,
-  segmentDurationSeconds: number,
-  durationSeconds: number | undefined,
-): boolean {
-  if (typeof durationSeconds !== 'number' || ranges.length !== 1) {
-    return false
-  }
-
-  const [range] = ranges
-  return range !== undefined
-    && range.startSegmentNumber === 1
-    && segmentEndSeconds(range.endSegmentNumber, segmentDurationSeconds) >= durationSeconds
-}
-
-function segmentNumberRanges(segmentNumbers: Set<number>): Array<{ startSegmentNumber: number; endSegmentNumber: number }> {
-  const sorted = [...segmentNumbers].sort((left, right) => left - right)
-  const ranges: Array<{ startSegmentNumber: number; endSegmentNumber: number }> = []
-
-  for (const segmentNumber of sorted) {
+  const ranges: PlaybackTimelineRange[] = []
+  for (const slotNumber of slots) {
     const lastRange = ranges.at(-1)
-    if (!lastRange || segmentNumber > lastRange.endSegmentNumber + 1) {
-      ranges.push({ startSegmentNumber: segmentNumber, endSegmentNumber: segmentNumber })
+    const startSeconds = slotStartSeconds(slotNumber, segmentDurationSeconds)
+    const endSeconds = capDuration(slotEndSeconds(slotNumber, segmentDurationSeconds), runtime.durationSeconds)
+    if (lastRange && Math.abs(lastRange.endSeconds - startSeconds) < 1e-9) {
+      lastRange.endSeconds = endSeconds
       continue
     }
 
-    lastRange.endSegmentNumber = segmentNumber
+    ranges.push({ startSeconds, endSeconds })
   }
 
   return ranges
 }
 
-function formatSegmentName(segmentNumber: number): string {
-  return `segment-${String(segmentNumber).padStart(6, '0')}.ts`
+function formatSegmentName(slotNumber: number): string {
+  return `segment-${String(slotNumber).padStart(6, '0')}.ts`
 }
 
 function parseSegmentNumber(segmentName: string): number | null {

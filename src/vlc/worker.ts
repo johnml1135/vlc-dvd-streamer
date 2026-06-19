@@ -1,5 +1,6 @@
+import { join } from 'node:path'
 import { createCommandSpec } from './command-spec.js'
-import { buildHlsArgs, buildThumbnailArgs } from './args.js'
+import { buildHlsArgs, buildPlaceholderArgs, buildThumbnailArgs } from './args.js'
 import { runManagedProcess, spawnManagedProcess, type ManagedProcessHandle } from './process-supervisor.js'
 import type { RawDiscScan } from '../disc/types.js'
 import type { ServerLog } from '../logging/server-log.js'
@@ -119,6 +120,32 @@ export class VlcWorker {
     return {
       handle: spawnManagedProcess(command),
       manifestPath: `${input.outputDir}/index.m3u8`,
+    }
+  }
+
+  /**
+   * Best-effort render of a reusable "bad sector" placeholder clip into
+   * outputDir/placeholder.ts. The session copies it into any unreadable slot so
+   * the viewer sees an explicit screen with the timeline staying accurate.
+   * Failures are non-fatal; the session falls back to a minimal placeholder.
+   */
+  async generatePlaceholderSegment(input: { outputDir: string; durationSeconds?: number }): Promise<void> {
+    if (this.options.shimScript) {
+      // The fake VLC used in tests does not render placeholders.
+      return
+    }
+
+    const outputPath = join(input.outputDir, 'placeholder.ts')
+    const command = createCommandSpec({
+      executable: this.options.executable,
+      args: buildPlaceholderArgs({ outputPath, durationSeconds: input.durationSeconds }),
+      timeoutMs: this.options.timeoutMs,
+      label: 'vlc-placeholder',
+    })
+
+    const result = await runManagedProcess(command)
+    if (!result.ok) {
+      throw new Error(result.stderr || result.stdout || 'VLC placeholder generation failed.')
     }
   }
 

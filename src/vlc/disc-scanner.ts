@@ -5,6 +5,9 @@ import type { ServerLog } from '../logging/server-log.js'
 import { applyInferredTrackLabels, enrichTrackLabels, extractPlayableTitleNumbers, extractSelectedAudioTrackId, extractSelectedSubtitleTrackId, mergeTitleProbeMetadata, parseTitleProbeLog, type InferredTrackLabels, type RuntimeTrackMetadata } from './scan-parser.js'
 import { runManagedProcess, type CompletedProcess } from './process-supervisor.js'
 import { FALLBACK_AUDIO_LANGUAGE, PRIMARY_AUDIO_LANGUAGE, buildDiscProbeCommand, buildLanguageProbeCommand, buildTitleProbeCommand, buildTrackMetadataCommand } from './probe-commands.js'
+import { readDvdTitlesFromIfo, type IfoTitle } from '../disc/ifo-reader.js'
+
+export type IfoTitleReader = (videoTsDir: string) => Promise<IfoTitle[]>
 
 const LANGUAGE_LABEL_PROBES = [
   { code: 'spa', label: 'Spanish' },
@@ -33,15 +36,18 @@ export interface VlcDiscScannerOptions {
   shimEnv?: NodeJS.ProcessEnv
   logger?: Pick<ServerLog, 'info' | 'warn' | 'error'>
   runProcess?: ProcessRunner
+  readIfoTitles?: IfoTitleReader
 }
 
 export class VlcDiscScanner {
   private readonly options: VlcDiscScannerOptions
   private readonly runProcess: ProcessRunner
+  private readonly readIfoTitles: IfoTitleReader
 
   constructor(options: VlcDiscScannerOptions) {
     this.options = options
     this.runProcess = options.runProcess ?? runManagedProcess
+    this.readIfoTitles = options.readIfoTitles ?? readDvdTitlesFromIfo
   }
 
   async scanDisc(input: { drive?: string; onProgress?: (progress: DiscScanProgress) => void } = {}): Promise<RawDiscScan> {
@@ -49,6 +55,17 @@ export class VlcDiscScanner {
     this.options.logger?.info('catalog', `Starting DVD scan for ${drive}.`)
 
     try {
+      // Fast path: read titles/durations/tracks straight from the unencrypted
+      // IFO files (milliseconds). Fall back to per-title VLC probes only if the
+      // disc does not expose a readable VIDEO_TS (e.g. unusual media).
+      if (!this.options.shimScript) {
+        const ifoScan = await this.scanDiscFromIfo(drive, input.onProgress)
+        if (ifoScan) {
+          this.options.logger?.info('catalog', `DVD scan finished with ${ifoScan.titles.length} titles (IFO).`)
+          return ifoScan
+        }
+      }
+
       const scan = this.options.shimScript
         ? await this.scanDiscWithShim(drive)
         : await this.scanDiscWithRealVlc(drive, input.onProgress)
@@ -58,6 +75,32 @@ export class VlcDiscScanner {
     } catch (error) {
       this.options.logger?.error('catalog', `DVD scan failed: ${error instanceof Error ? error.message : 'Unknown scan error.'}`)
       throw error
+    }
+  }
+
+  private async scanDiscFromIfo(drive: string, onProgress?: (progress: DiscScanProgress) => void): Promise<RawDiscScan | null> {
+    const videoTsDir = `${drive.replace(/[/\\]+$/, '')}/VIDEO_TS`
+    try {
+      const ifoTitles = await this.readIfoTitles(videoTsDir)
+      const titles: RawDiscTitle[] = ifoTitles
+        .filter((title) => title.durationSeconds > 0)
+        .map((title) => ({
+          titleNumber: title.titleNumber,
+          durationSeconds: title.durationSeconds,
+          audioTracks: title.audioTracks,
+          subtitleTracks: title.subtitleTracks,
+        }))
+
+      if (titles.length === 0) {
+        this.options.logger?.warn('catalog', `IFO read for ${videoTsDir} produced no titles; falling back to VLC probes.`)
+        return null
+      }
+
+      onProgress?.({ scannedTitles: titles.length, totalTitles: titles.length, currentTitleNumber: null })
+      return { discId: computeDiscId(drive, titles), drive, titles }
+    } catch (error) {
+      this.options.logger?.warn('catalog', `IFO read for ${videoTsDir} failed; falling back to VLC probes: ${formatError(error)}`)
+      return null
     }
   }
 
@@ -129,13 +172,8 @@ export class VlcDiscScanner {
       throw new Error('VLC opened the DVD but no title probe produced usable duration metadata.')
     }
 
-    const discId = createHash('sha1')
-      .update(`${drive}|${titles.map((title) => `${title.titleNumber}:${title.durationSeconds}`).join('|')}`)
-      .digest('hex')
-      .slice(0, 12)
-
     return {
-      discId: `disc-${discId}`,
+      discId: computeDiscId(drive, titles),
       drive,
       titles,
     }
@@ -407,6 +445,15 @@ function parseTrackOptions(values: unknown[]): Array<{ id: number; label: string
   }
 
   return tracks
+}
+
+function computeDiscId(drive: string, titles: RawDiscTitle[]): string {
+  const fingerprint = createHash('sha1')
+    .update(`${drive}|${titles.map((title) => `${title.titleNumber}:${title.durationSeconds}`).join('|')}`)
+    .digest('hex')
+    .slice(0, 12)
+
+  return `disc-${fingerprint}`
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -1,16 +1,23 @@
 import { randomUUID } from 'node:crypto'
-import { access, mkdir, readFile, rm } from 'node:fs/promises'
+import { access, copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ManagedProcessHandle } from '../vlc/process-supervisor.js'
 import type { StartHlsSessionInput, StartHlsSessionResult } from '../vlc/worker.js'
 import type { ServerLog } from '../logging/server-log.js'
 import {
+  buildRegionManifest,
   buildStitchedManifest,
   createInitialTimelineRuntime,
+  getCurrentRange,
   isTimeInRange,
-  noteTimelineProgress,
+  markBadSlot,
+  nextExpectedSlot,
+  noteGeneratedSlots,
   normalizeSeekPosition,
   segmentNumberForTime,
+  setRegionStart,
+  slotEndSeconds,
+  slotStartSeconds,
   toTimelineSnapshot,
   type PlaybackTimelineRuntime,
   type PlaybackTimelineSnapshot,
@@ -92,19 +99,32 @@ export interface PlaybackRecoveryOptions {
   monitorIntervalMs?: number
   restartReadinessTimeoutMs?: number
   stopTimeoutMs?: number
+  /** Retired: bad sectors are now filled one slot at a time, never skipped in bulk. Accepted for config compatibility. */
   skipSeconds?: number
   readRetryAttempts?: number
+  /** Maximum consecutive failed VLC restarts before declaring the disc unreadable. */
   maxAttempts?: number
   segmentDurationSeconds?: number
 }
 
-interface PlaybackRecoveryRuntime extends PlaybackRecoverySnapshot {
-  consecutiveAttempts: number
-  readRetryAttempts: number
-  epochStartTimeSeconds: number
-  epochInitialSegmentNumber: number | null
+interface PlaybackRecoveryRuntime {
+  enabled: boolean
+  status: PlaybackRecoveryStatus
+  attempts: number
+  epoch: number
+  skippedSeconds: number
+  lastGoodTimeSeconds: number
+  lastProgressAt?: string
+  lastSegmentName?: string
+  message?: string
+  badRanges: PlaybackRecoveryRange[]
+  // Internal control state — never surfaced in the public snapshot.
   lastProgressAtMs: number | null
-  lastSegmentNumber: number | null
+  consecutiveReadRetries: number
+  retryAnchorSlot: number | null
+  consecutiveBadSlots: number
+  restartFailures: number
+  inBadRun: boolean
 }
 
 interface HlsProgress {
@@ -115,6 +135,7 @@ interface HlsProgress {
 
 interface HlsSessionWorker {
   startHlsSession(input: StartHlsSessionInput): Promise<StartHlsSessionResult>
+  generatePlaceholderSegment?(input: { outputDir: string; durationSeconds?: number }): Promise<void>
 }
 
 export interface SessionManagerEvent {
@@ -130,6 +151,10 @@ export interface SessionManagerOptions {
   playbackRecovery?: PlaybackRecoveryOptions
   onSessionEvent?: (event: SessionManagerEvent) => void
   logger?: ServerLog
+  /** Injectable clock so stall/recovery timing is deterministic in tests. */
+  now?: () => number
+  /** Writes the bad-sector placeholder for a slot. Defaults to a minimal valid TS packet. */
+  writePlaceholderSegment?: (filePath: string, slotNumber: number) => Promise<void>
 }
 
 const DEFAULT_RECOVERY_OPTIONS = {
@@ -144,13 +169,27 @@ const DEFAULT_RECOVERY_OPTIONS = {
   segmentDurationSeconds: 2,
 } satisfies Required<PlaybackRecoveryOptions>
 
+// A single MPEG-TS null packet: enough to be a structurally valid, non-empty
+// segment. The host can supply a nicer rendered "bad sector" clip via
+// writePlaceholderSegment; this default just keeps the timeline honest.
+const PLACEHOLDER_TS_PACKET = (() => {
+  const packet = Buffer.alloc(188, 0xff)
+  packet[0] = 0x47
+  packet[1] = 0x1f
+  packet[2] = 0xff
+  packet[3] = 0x10
+  return packet
+})()
+
 export class SessionManager {
   private readonly options: SessionManagerOptions
   private readonly sessions = new Map<string, SessionRecord>()
   private activeSessionId: string | null = null
+  private readonly now: () => number
 
   constructor(options: SessionManagerOptions) {
     this.options = options
+    this.now = options.now ?? Date.now
   }
 
   getSession(sessionId: string): PlaybackSession | undefined {
@@ -168,6 +207,16 @@ export class SessionManager {
     }
 
     return this.getSession(this.activeSessionId)
+  }
+
+  /** Manifest the browser plays: the contiguous region from the current edit point, placeholders inline. */
+  getRegionManifest(sessionId: string): string | null {
+    const session = this.sessions.get(sessionId)
+    if (!session) {
+      return null
+    }
+
+    return buildRegionManifest(session.timelineRuntime, this.getRecoveryOptions().segmentDurationSeconds)
   }
 
   getStitchedManifest(sessionId: string): string | null {
@@ -206,10 +255,10 @@ export class SessionManager {
 
     session.lastAccessedAt = new Date().toISOString()
 
-    if (isTimeInRange(positionSeconds, session.timelineRuntime.currentRange)) {
+    if (isTimeInRange(positionSeconds, getCurrentRange(session.timelineRuntime))) {
       session.timelineRuntime.status = 'idle'
       session.timelineRuntime.lastSeekSeconds = positionSeconds
-      session.timelineRuntime.message = `Title time ${positionSeconds} seconds is already available in the current HLS window.`
+      session.timelineRuntime.message = `Title time ${positionSeconds} seconds is already available in the current region.`
       return {
         ok: true,
         action: 'already-available',
@@ -218,65 +267,69 @@ export class SessionManager {
       }
     }
 
+    // Take exclusive control away from the recovery monitor: stop scheduling new
+    // ticks and wait for any in-flight tick to finish before mutating state, so
+    // a concurrent recovery step cannot race the seek.
     this.clearRecoveryMonitor(session)
-  this.resetRecoveryRetryPolicy(session)
-    const previousSegmentName = session.recoveryRuntime.lastSegmentName
-    const initialSegmentNumber = segmentNumberForTime(positionSeconds, recoveryOptions.segmentDurationSeconds)
-
-    session.timelineRuntime.status = 'seeking'
-    session.timelineRuntime.lastSeekSeconds = positionSeconds
-    session.timelineRuntime.message = `Seeking to ${positionSeconds} seconds.`
-    this.publishSessionEvent({
-      type: 'session.seek',
-      payload: {
-        sessionId: session.id,
-        status: session.timelineRuntime.status,
-        positionSeconds,
-      },
-    })
-
-    await this.stopHandle(session.handle, `seek session ${session.id}`)
-
+    await this.waitForRecoveryIdle(session)
+    session.recoveryInFlight = true
     try {
-      const runtime = await this.options.worker.startHlsSession({
-        drive: session.drive,
-        titleNumber: session.titleNumber,
-        audioTrack: session.audioTrack,
-        subtitleTrack: session.subtitleTrack,
-        outputDir: session.outputDir,
-        baseUrl: session.baseUrl,
-        startTimeSeconds: positionSeconds,
-        initialSegmentNumber,
-      })
-      session.handle = runtime.handle
-      session.manifestPath = runtime.manifestPath
-      session.recoveryRuntime.epoch += 1
-      session.recoveryRuntime.epochStartTimeSeconds = positionSeconds
-      session.recoveryRuntime.epochInitialSegmentNumber = initialSegmentNumber
+      this.resetRecoveryRegionState(session)
+      const initialSegmentNumber = segmentNumberForTime(positionSeconds, recoveryOptions.segmentDurationSeconds)
 
-      const progress = await this.waitForRecoveryReadiness(session, previousSegmentName)
-      this.notePlaybackProgress(session, progress, Date.now())
-      session.timelineRuntime.status = 'idle'
-      session.timelineRuntime.message = `Ready at ${positionSeconds} seconds.`
-      session.lastAccessedAt = new Date().toISOString()
-      this.publishSessionEvent({ type: 'session.updated', payload: this.toPlaybackSession(session) })
-      this.scheduleRecoveryMonitor(session)
-      return {
-        ok: true,
-        action: 'restarted',
-        positionSeconds,
-        session: this.toPlaybackSession(session),
+      session.timelineRuntime.status = 'seeking'
+      session.timelineRuntime.lastSeekSeconds = positionSeconds
+      session.timelineRuntime.message = `Seeking to ${positionSeconds} seconds.`
+      // A user seek opens a brand-new contiguous region anchored at the target.
+      setRegionStart(session.timelineRuntime, initialSegmentNumber)
+      this.publishSessionEvent({
+        type: 'session.seek',
+        payload: {
+          sessionId: session.id,
+          status: session.timelineRuntime.status,
+          positionSeconds,
+        },
+      })
+
+      await this.stopHandle(session.handle, `seek session ${session.id}`)
+
+      try {
+        await this.restartWorker(session, positionSeconds, initialSegmentNumber)
+        const progress = await this.waitForFreshSegment(session, initialSegmentNumber)
+        this.notePlaybackProgress(session, progress, this.now())
+        session.timelineRuntime.status = 'idle'
+        session.timelineRuntime.message = `Ready at ${positionSeconds} seconds.`
+        session.lastAccessedAt = new Date().toISOString()
+        this.publishSessionEvent({ type: 'session.updated', payload: this.toPlaybackSession(session) })
+        return {
+          ok: true,
+          action: 'restarted',
+          positionSeconds,
+          session: this.toPlaybackSession(session),
+        }
+      } catch (error) {
+        session.timelineRuntime.status = 'idle'
+        session.timelineRuntime.message = `Seek did not produce HLS output: ${formatError(error)}`
+        session.error = {
+          message: 'Playback seek failed.',
+          detail: formatError(error),
+        }
+        // Let the recovery monitor take over from the seek target so an unreadable
+        // landing zone is bad-filled rather than left hanging.
+        session.recoveryRuntime.lastProgressAtMs = this.now()
+        this.publishSessionEvent({ type: 'session.updated', payload: this.toPlaybackSession(session) })
+        return { ok: false, reason: 'not-ready', message: session.error.detail ?? session.error.message }
       }
-    } catch (error) {
-      session.timelineRuntime.status = 'idle'
-      session.timelineRuntime.message = `Seek did not produce HLS output: ${formatError(error)}`
-      session.error = {
-        message: 'Playback seek failed.',
-        detail: formatError(error),
-      }
-      this.publishSessionEvent({ type: 'session.updated', payload: this.toPlaybackSession(session) })
+    } finally {
+      session.recoveryInFlight = false
       this.scheduleRecoveryMonitor(session)
-      return { ok: false, reason: 'not-ready', message: session.error.detail ?? session.error.message }
+    }
+  }
+
+  private async waitForRecoveryIdle(session: SessionRecord): Promise<void> {
+    const deadline = Date.now() + this.getRecoveryOptions().stopTimeoutMs
+    while (session.recoveryInFlight && Date.now() < deadline) {
+      await delay(10)
     }
   }
 
@@ -298,7 +351,10 @@ export class SessionManager {
     const baseUrl = `/streams/${id}/`
     await mkdir(outputDir, { recursive: true })
 
+    const recoveryOptions = this.getRecoveryOptions()
     const now = new Date().toISOString()
+    // Always anchor the first epoch to slot 1 / DVD time 0 so segment file
+    // numbers equal slot numbers from the very start.
     const runtime = await this.options.worker.startHlsSession({
       drive: request.drive,
       titleNumber: request.titleNumber,
@@ -306,6 +362,8 @@ export class SessionManager {
       subtitleTrack: request.subtitleTrack,
       outputDir,
       baseUrl,
+      startTimeSeconds: 0,
+      initialSegmentNumber: 1,
     })
 
     const session: SessionRecord = {
@@ -319,8 +377,8 @@ export class SessionManager {
       lastAccessedAt: now,
       handle: runtime.handle,
       baseUrl,
-      recoveryRuntime: createInitialRecoveryRuntime(this.getRecoveryOptions().enabled),
-      timelineRuntime: createInitialTimelineRuntime(request.durationSeconds),
+      recoveryRuntime: createInitialRecoveryRuntime(recoveryOptions.enabled),
+      timelineRuntime: createInitialTimelineRuntime(request.durationSeconds, recoveryOptions.segmentDurationSeconds),
       recoveryInFlight: false,
     }
 
@@ -328,11 +386,21 @@ export class SessionManager {
     this.activeSessionId = id
     this.options.logger?.info('session', `Session ${id} created for title ${request.titleNumber}.`)
 
+    // Render the reusable bad-sector placeholder in the background so it is ready
+    // by the time (if ever) an unreadable sector is hit. Non-fatal on failure.
+    if (this.options.worker.generatePlaceholderSegment) {
+      void this.options.worker
+        .generatePlaceholderSegment({ outputDir, durationSeconds: recoveryOptions.segmentDurationSeconds })
+        .catch((error) => {
+          this.options.logger?.warn('session', `Bad-sector placeholder render failed for session ${id}: ${formatError(error)}`)
+        })
+    }
+
     try {
       await this.waitForReadiness(session)
       const initialProgress = await this.readHlsProgress(session.outputDir, session.manifestPath)
       if (initialProgress) {
-        this.notePlaybackProgress(session, initialProgress, Date.now())
+        this.notePlaybackProgress(session, initialProgress, this.now())
       }
       session.state = 'ready'
       session.recovery = this.toRecoverySnapshot(session.recoveryRuntime)
@@ -509,116 +577,148 @@ export class SessionManager {
       this.options.logger?.warn('session', `Recovery monitor for session ${session.id} failed: ${formatError(error)}`)
     } finally {
       session.recoveryInFlight = false
-      this.scheduleRecoveryMonitor(session)
+      if (session.state === 'ready') {
+        this.scheduleRecoveryMonitor(session)
+      }
     }
   }
 
   private async checkPlaybackProgress(session: SessionRecord): Promise<void> {
     const recoveryOptions = this.getRecoveryOptions()
+    const runtime = session.recoveryRuntime
     const progress = await this.readHlsProgress(session.outputDir, session.manifestPath)
-    const now = Date.now()
+    const now = this.now()
 
-    if (progress && progress.lastSegmentName !== session.recoveryRuntime.lastSegmentName) {
+    if (progress && progress.lastSegmentName !== runtime.lastSegmentName) {
+      const previousGoodTimeSeconds = runtime.lastGoodTimeSeconds
       this.notePlaybackProgress(session, progress, now)
-      if (session.recoveryRuntime.status === 'recovering') {
-        session.recoveryRuntime.status = 'idle'
-        session.recoveryRuntime.consecutiveAttempts = 0
-        session.recoveryRuntime.readRetryAttempts = 0
-        session.recoveryRuntime.message = `Recovered playback after skipping ${recoveryOptions.skipSeconds} seconds.`
-        this.publishRecoveryEvent(session)
+      const advanced = runtime.lastGoodTimeSeconds > previousGoodTimeSeconds
+      if (advanced) {
+        runtime.consecutiveReadRetries = 0
+        runtime.retryAnchorSlot = null
+        runtime.consecutiveBadSlots = 0
+        runtime.inBadRun = false
+        if (runtime.status === 'recovering') {
+          runtime.status = 'idle'
+          runtime.message = 'Recovered DVD playback at the next readable sector.'
+          this.publishRecoveryEvent(session)
+        }
       }
       return
     }
 
-    if (session.recoveryRuntime.lastProgressAtMs === null) {
+    if (runtime.lastProgressAtMs === null) {
       return
     }
 
-    if (now - session.recoveryRuntime.lastProgressAtMs >= recoveryOptions.stallTimeoutMs) {
-      await this.recoverStalledPlayback(session)
+    // Reached the end of the title — nothing more to read.
+    if (this.hasReachedEndOfTitle(session)) {
+      this.clearRecoveryMonitor(session)
+      return
+    }
+
+    if (now - runtime.lastProgressAtMs >= recoveryOptions.stallTimeoutMs) {
+      await this.performRecoveryStep(session)
     }
   }
 
-  private async recoverStalledPlayback(session: SessionRecord): Promise<void> {
-    const recoveryOptions = this.getRecoveryOptions()
-    const previousSegmentName = session.recoveryRuntime.lastSegmentName
-    const previousLastGoodTimeSeconds = session.recoveryRuntime.lastGoodTimeSeconds
-    const nextReadRetryAttempt = session.recoveryRuntime.readRetryAttempts + 1
-    const shouldRetryRead = nextReadRetryAttempt <= recoveryOptions.readRetryAttempts
-    const nextSkipAttempt = session.recoveryRuntime.consecutiveAttempts + 1
+  private hasReachedEndOfTitle(session: SessionRecord): boolean {
+    const duration = session.timelineRuntime.durationSeconds
+    return typeof duration === 'number' && session.recoveryRuntime.lastGoodTimeSeconds >= duration
+  }
 
-    if (!shouldRetryRead && nextSkipAttempt > recoveryOptions.maxAttempts) {
-      await this.exhaustRecovery(session)
+  private async performRecoveryStep(session: SessionRecord): Promise<void> {
+    const recoveryOptions = this.getRecoveryOptions()
+    const segmentDurationSeconds = recoveryOptions.segmentDurationSeconds
+    const runtime = session.recoveryRuntime
+    const stallSlot = nextExpectedSlot(session.timelineRuntime)
+    const stallTimeSeconds = slotStartSeconds(stallSlot, segmentDurationSeconds)
+
+    if (this.hasReachedEndOfTitle(session)) {
+      this.clearRecoveryMonitor(session)
       return
     }
 
-    const resumeTimeSeconds = shouldRetryRead
-      ? previousLastGoodTimeSeconds
-      : previousLastGoodTimeSeconds + recoveryOptions.skipSeconds
-    const initialSegmentNumber = segmentNumberForTime(resumeTimeSeconds, recoveryOptions.segmentDurationSeconds)
-
-    session.recoveryRuntime.status = 'recovering'
-    session.recoveryRuntime.attempts += 1
-    if (shouldRetryRead) {
-      session.recoveryRuntime.readRetryAttempts = nextReadRetryAttempt
-      session.recoveryRuntime.message = `DVD read stalled near ${previousLastGoodTimeSeconds} seconds. Retrying read ${nextReadRetryAttempt} of ${recoveryOptions.readRetryAttempts}.`
-    } else {
-      session.recoveryRuntime.consecutiveAttempts = nextSkipAttempt
-      session.recoveryRuntime.skippedSeconds += recoveryOptions.skipSeconds
-      session.recoveryRuntime.message = `Unreadable DVD area persisted after ${recoveryOptions.readRetryAttempts} retries. Skipping ahead to ${resumeTimeSeconds} seconds.`
-      session.recoveryRuntime.badRanges.push({
-        startSeconds: previousLastGoodTimeSeconds,
-        endSeconds: resumeTimeSeconds,
-        reason: 'dvd-read-stall',
-      })
+    // Counters are anchored to the exact DVD slot we are stuck on, so a single
+    // segment squeaking out elsewhere can never reset the escalation.
+    if (runtime.retryAnchorSlot !== stallSlot) {
+      runtime.retryAnchorSlot = stallSlot
+      runtime.consecutiveReadRetries = 0
     }
+
+    const readReason = describeReadError(session.handle.getStderr())
+    const shouldRetryRead = !runtime.inBadRun && runtime.consecutiveReadRetries < recoveryOptions.readRetryAttempts
+
+    let resumeTimeSeconds: number
+    if (shouldRetryRead) {
+      runtime.consecutiveReadRetries += 1
+      resumeTimeSeconds = stallTimeSeconds
+      runtime.message = `DVD read stalled at ${formatClock(stallTimeSeconds)}${readReason ? ` (${readReason})` : ''}. Retrying read ${runtime.consecutiveReadRetries} of ${recoveryOptions.readRetryAttempts}.`
+    } else {
+      // Confirmed unreadable: fill exactly this one slot with a bad-sector
+      // marker and advance by a single slot. Time stays exact to the DVD.
+      markBadSlot(session.timelineRuntime, stallSlot)
+      await this.writePlaceholderSlot(session, stallSlot)
+      runtime.skippedSeconds += segmentDurationSeconds
+      runtime.consecutiveBadSlots += 1
+      runtime.inBadRun = true
+      this.recordBadRange(runtime, stallTimeSeconds, slotEndSeconds(stallSlot, segmentDurationSeconds))
+      runtime.lastGoodTimeSeconds = getCurrentRange(session.timelineRuntime).endSeconds
+      runtime.consecutiveReadRetries = 0
+      runtime.retryAnchorSlot = stallSlot + 1
+      resumeTimeSeconds = slotStartSeconds(stallSlot + 1, segmentDurationSeconds)
+      runtime.message = `Unreadable DVD sector at ${formatClock(stallTimeSeconds)}; inserted a bad-sector marker and continued (${formatClock(runtime.skippedSeconds)} filled so far).`
+    }
+
+    runtime.status = 'recovering'
+    runtime.attempts += 1
     this.publishRecoveryEvent(session)
-    this.options.logger?.warn('session', `Session ${session.id} stalled near ${previousLastGoodTimeSeconds}s; restarting VLC at ${resumeTimeSeconds}s.`)
+    this.options.logger?.warn('session', `Session ${session.id}: ${runtime.message}`)
 
     await this.stopHandle(session.handle, `stalled session ${session.id}`)
 
     try {
-      const runtime = await this.options.worker.startHlsSession({
-        drive: session.drive,
-        titleNumber: session.titleNumber,
-        audioTrack: session.audioTrack,
-        subtitleTrack: session.subtitleTrack,
-        outputDir: session.outputDir,
-        baseUrl: session.baseUrl,
-        startTimeSeconds: resumeTimeSeconds,
-        initialSegmentNumber,
-      })
-      session.handle = runtime.handle
-      session.manifestPath = runtime.manifestPath
-      session.recoveryRuntime.epoch += 1
-      session.recoveryRuntime.epochStartTimeSeconds = resumeTimeSeconds
-      session.recoveryRuntime.epochInitialSegmentNumber = initialSegmentNumber
-
-      const progress = await this.waitForRecoveryReadiness(session, previousSegmentName)
-      this.notePlaybackProgress(session, progress, Date.now())
-      session.recoveryRuntime.status = 'idle'
-      if (shouldRetryRead) {
-        session.recoveryRuntime.message = `Retried DVD read at ${resumeTimeSeconds} seconds.`
-      } else {
-        session.recoveryRuntime.consecutiveAttempts = 0
-        session.recoveryRuntime.readRetryAttempts = 0
-        session.recoveryRuntime.message = `Skipped ${resumeTimeSeconds - previousLastGoodTimeSeconds} seconds and resumed playback.`
-      }
-      this.publishRecoveryEvent(session)
+      await this.restartWorker(session, resumeTimeSeconds, segmentNumberForTime(resumeTimeSeconds, segmentDurationSeconds))
+      runtime.restartFailures = 0
+      // Give the freshly started process a full stall window to produce output
+      // before the next tick can act.
+      runtime.lastProgressAtMs = this.now()
     } catch (error) {
-      session.recoveryRuntime.message = `Recovery attempt did not produce HLS output: ${formatError(error)}`
+      runtime.restartFailures += 1
+      runtime.message = `Recovery restart failed: ${formatError(error)}`
       this.publishRecoveryEvent(session)
-      this.options.logger?.warn('session', `Session ${session.id} recovery attempt failed: ${formatError(error)}`)
+      this.options.logger?.warn('session', `Session ${session.id} recovery restart failed (${runtime.restartFailures}/${recoveryOptions.maxAttempts}): ${formatError(error)}`)
+      if (runtime.restartFailures > recoveryOptions.maxAttempts) {
+        await this.exhaustRecovery(session)
+      }
     }
   }
 
-  private async waitForRecoveryReadiness(session: SessionRecord, previousSegmentName: string | undefined): Promise<HlsProgress> {
+  private async restartWorker(session: SessionRecord, startTimeSeconds: number, initialSegmentNumber: number): Promise<void> {
+    const runtime = await this.options.worker.startHlsSession({
+      drive: session.drive,
+      titleNumber: session.titleNumber,
+      audioTrack: session.audioTrack,
+      subtitleTrack: session.subtitleTrack,
+      outputDir: session.outputDir,
+      baseUrl: session.baseUrl,
+      startTimeSeconds,
+      initialSegmentNumber,
+    })
+    session.handle = runtime.handle
+    session.manifestPath = runtime.manifestPath
+    // Each VLC (re)start is a new discontinuity group so the composed manifest
+    // marks the timestamp reset.
+    session.recoveryRuntime.epoch += 1
+  }
+
+  private async waitForFreshSegment(session: SessionRecord, minSlotNumber: number): Promise<HlsProgress> {
     const recoveryOptions = this.getRecoveryOptions()
     const deadline = Date.now() + recoveryOptions.restartReadinessTimeoutMs
 
     while (Date.now() < deadline) {
       const progress = await this.readHlsProgress(session.outputDir, session.manifestPath)
-      if (progress && progress.lastSegmentName !== previousSegmentName) {
+      if (progress && progress.lastSegmentNumber !== null && progress.lastSegmentNumber >= minSlotNumber) {
         return progress
       }
 
@@ -629,21 +729,54 @@ export class SessionManager {
 
       if (status === 'exited') {
         const result = await session.handle.completion
-        throw new Error(result.stderr || result.stdout || 'VLC exited before recovered HLS output was ready.')
+        throw new Error(result.stderr || result.stdout || 'VLC exited before fresh HLS output was ready.')
       }
     }
 
-    throw new Error('Timed out waiting for recovered HLS output.')
+    throw new Error('Timed out waiting for fresh HLS output.')
+  }
+
+  private recordBadRange(runtime: PlaybackRecoveryRuntime, startSeconds: number, endSeconds: number): void {
+    const lastRange = runtime.badRanges.at(-1)
+    if (lastRange && Math.abs(lastRange.endSeconds - startSeconds) < 1e-9) {
+      lastRange.endSeconds = endSeconds
+      return
+    }
+
+    runtime.badRanges.push({ startSeconds, endSeconds, reason: 'dvd-read-stall' })
+  }
+
+  private async writePlaceholderSlot(session: SessionRecord, slotNumber: number): Promise<void> {
+    const filePath = join(session.outputDir, formatSegmentName(slotNumber))
+    if (this.options.writePlaceholderSegment) {
+      try {
+        await this.options.writePlaceholderSegment(filePath, slotNumber)
+        return
+      } catch (error) {
+        this.options.logger?.warn('session', `Custom bad-sector placeholder failed for slot ${slotNumber}: ${formatError(error)}`)
+      }
+    }
+
+    // Best-effort nicety: reuse a host-rendered placeholder.ts if one exists.
+    const sessionPlaceholder = join(session.outputDir, 'placeholder.ts')
+    try {
+      await copyFile(sessionPlaceholder, filePath)
+      return
+    } catch {
+      // Fall back to the minimal valid packet below.
+    }
+
+    await writeFile(filePath, PLACEHOLDER_TS_PACKET)
   }
 
   private async exhaustRecovery(session: SessionRecord): Promise<void> {
     this.clearRecoveryMonitor(session)
     session.recoveryRuntime.status = 'exhausted'
-    session.recoveryRuntime.message = 'Playback stopped after repeated unreadable DVD sectors.'
+    session.recoveryRuntime.message = 'Playback stopped: the DVD drive could not restart playback after repeated attempts.'
     session.state = 'failed'
     session.error = {
       message: 'Playback stopped after repeated unreadable DVD sectors.',
-      detail: `VLC could not recover after ${session.recoveryRuntime.attempts} skip attempts.`,
+      detail: `VLC could not restart after ${session.recoveryRuntime.restartFailures} attempts.`,
     }
     if (this.activeSessionId === session.id) {
       this.activeSessionId = null
@@ -678,28 +811,12 @@ export class SessionManager {
   }
 
   private notePlaybackProgress(session: SessionRecord, progress: HlsProgress, nowMs: number): void {
-    const recoveryOptions = this.getRecoveryOptions()
     const runtime = session.recoveryRuntime
-    noteTimelineProgress(session.timelineRuntime, progress.segmentNames, recoveryOptions.segmentDurationSeconds)
-    if (runtime.status !== 'recovering') {
-      runtime.consecutiveAttempts = 0
-      runtime.readRetryAttempts = 0
-    }
+    noteGeneratedSlots(session.timelineRuntime, progress.segmentNames, runtime.epoch)
     runtime.lastSegmentName = progress.lastSegmentName
-    runtime.lastSegmentNumber = progress.lastSegmentNumber
     runtime.lastProgressAtMs = nowMs
     runtime.lastProgressAt = new Date(nowMs).toISOString()
-
-    if (progress.lastSegmentNumber !== null && runtime.epochInitialSegmentNumber !== null) {
-      runtime.lastGoodTimeSeconds = runtime.epochStartTimeSeconds
-        + Math.max(1, progress.lastSegmentNumber - runtime.epochInitialSegmentNumber + 1) * recoveryOptions.segmentDurationSeconds
-      return
-    }
-
-    runtime.lastGoodTimeSeconds = Math.max(
-      runtime.lastGoodTimeSeconds + recoveryOptions.segmentDurationSeconds,
-      runtime.epochStartTimeSeconds + progress.segmentNames.length * recoveryOptions.segmentDurationSeconds,
-    )
+    runtime.lastGoodTimeSeconds = getCurrentRange(session.timelineRuntime).endSeconds
   }
 
   private async stopHandle(handle: ManagedProcessHandle, label: string): Promise<void> {
@@ -742,9 +859,16 @@ export class SessionManager {
     this.options.onSessionEvent?.(event)
   }
 
-  private resetRecoveryRetryPolicy(session: SessionRecord): void {
-    session.recoveryRuntime.consecutiveAttempts = 0
-    session.recoveryRuntime.readRetryAttempts = 0
+  private resetRecoveryRegionState(session: SessionRecord): void {
+    const runtime = session.recoveryRuntime
+    runtime.consecutiveReadRetries = 0
+    runtime.retryAnchorSlot = null
+    runtime.consecutiveBadSlots = 0
+    runtime.inBadRun = false
+    runtime.restartFailures = 0
+    if (runtime.status === 'recovering') {
+      runtime.status = 'idle'
+    }
   }
 
   private toRecoverySnapshot(runtime: PlaybackRecoveryRuntime): PlaybackRecoverySnapshot {
@@ -779,16 +903,16 @@ function createInitialRecoveryRuntime(enabled: boolean): PlaybackRecoveryRuntime
     enabled,
     status: 'idle',
     attempts: 0,
-    consecutiveAttempts: 0,
-    readRetryAttempts: 0,
     epoch: 0,
     skippedSeconds: 0,
     lastGoodTimeSeconds: 0,
-    lastProgressAtMs: null,
-    lastSegmentNumber: null,
-    epochStartTimeSeconds: 0,
-    epochInitialSegmentNumber: 1,
     badRanges: [],
+    lastProgressAtMs: null,
+    consecutiveReadRetries: 0,
+    retryAnchorSlot: null,
+    consecutiveBadSlots: 0,
+    restartFailures: 0,
+    inBadRun: false,
   }
 }
 
@@ -813,6 +937,41 @@ function parseSegmentNumber(segmentName: string): number | null {
 
   const parsed = Number(match[1])
   return Number.isInteger(parsed) ? parsed : null
+}
+
+function formatSegmentName(slotNumber: number): string {
+  return `segment-${String(slotNumber).padStart(6, '0')}.ts`
+}
+
+const READ_ERROR_PATTERNS = [
+  /input\/output error/i,
+  /could not read/i,
+  /read error/i,
+  /failed to read/i,
+  /cannot read/i,
+  /unreadable/i,
+  /sector/i,
+]
+
+function describeReadError(stderr: string): string | null {
+  if (!stderr) {
+    return null
+  }
+
+  const matched = READ_ERROR_PATTERNS.some((pattern) => pattern.test(stderr))
+  return matched ? 'disc read error reported by VLC' : null
+}
+
+function formatClock(totalSeconds: number): string {
+  const safeSeconds = Number.isFinite(totalSeconds) && totalSeconds > 0 ? Math.floor(totalSeconds) : 0
+  const hours = Math.floor(safeSeconds / 3600)
+  const minutes = Math.floor((safeSeconds % 3600) / 60)
+  const seconds = safeSeconds % 60
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+  }
+
+  return `${minutes}:${String(seconds).padStart(2, '0')}`
 }
 
 function formatError(error: unknown): string {

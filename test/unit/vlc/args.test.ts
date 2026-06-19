@@ -65,6 +65,23 @@ describe('buildHlsArgs', () => {
     expect(args.some((arg) => arg.includes('segment-######.ts'))).toBe(true)
   })
 
+  it('pins a fixed GOP and frame rate so segments map exactly to DVD time', () => {
+    const args = buildHlsArgs({
+      drive: 'D:',
+      titleNumber: 4,
+      outputDir: 'C:/cache/sessions/session-1',
+      baseUrl: '/streams/session-1/',
+    })
+
+    // 2s segments at 25fps => a keyframe every 50 frames, no scene-cut keyframes.
+    expect(args).toContain('--sout-x264-keyint=50')
+    expect(args).toContain('--sout-x264-min-keyint=50')
+    expect(args).toContain('--sout-x264-scenecut=0')
+    expect(args.some((arg) => arg.includes('fps=25'))).toBe(true)
+    expect(args.some((arg) => arg.includes('seglen=2'))).toBe(true)
+    expect(args.some((arg) => arg.includes('use-key-frames'))).toBe(true)
+  })
+
   it('prefers English audio automatically when no explicit audio track is selected', () => {
     const args = buildHlsArgs({
       drive: 'D:',

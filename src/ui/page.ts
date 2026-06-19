@@ -188,18 +188,15 @@ export function renderPlayerPage(input: PlayerPageInput): string {
         }
 
         function syncRecoveredSession(payload) {
-          if (!payload || typeof payload !== 'object' || payload.sessionId !== sessionId || payload.status !== 'idle') {
+          if (!payload || typeof payload !== 'object' || payload.sessionId !== sessionId) {
             return
           }
 
-          const recoveredSession = payload.session
-          const recoveryEpoch = recoveryEpochFromSession(recoveredSession)
-          if (recoveryEpoch === null || recoveryEpoch <= activeRecoveryEpoch) {
-            return
-          }
-
-          applySessionTimeline(recoveredSession)
-          reloadPlaybackSource()
+          // The browser plays a server-composed manifest that stays anchored to
+          // the region start and grows in place (bad sectors are filled inline),
+          // so recovery never needs a source reload or a playback-time reset.
+          // Only a user seek opens a new region and reloads.
+          applySessionTimeline(payload.session)
         }
 
         function seekWithinCurrentMedia(titleSeconds) {

@@ -46,6 +46,10 @@ describe('VlcDiscScanner', () => {
       timeoutMs: 30000,
       trackMetadataScript: 'scripts/windows/query-vlc-track-descriptions.ps1',
       runProcess,
+      // Force the VLC-probe fallback path for this test.
+      readIfoTitles: async () => {
+        throw new Error('no IFO available')
+      },
     })
 
     const scan = await scanner.scanDisc({
@@ -86,9 +90,39 @@ describe('VlcDiscScanner', () => {
       runProcess: async () => completed({
         stderr: 'dvdnav warning: cannot decrypt disc title table',
       }),
+      readIfoTitles: async () => {
+        throw new Error('no IFO available')
+      },
     })
 
     await expect(scanner.scanDisc()).rejects.toThrow(/cannot decrypt disc title table/i)
+  })
+
+  it('reads titles from IFO files without launching VLC when VIDEO_TS is readable', async () => {
+    const runProcess = vi.fn(async () => completed({}))
+    const scanner = new VlcDiscScanner({
+      executable: 'vlc',
+      drive: 'F:',
+      timeoutMs: 30000,
+      runProcess,
+      readIfoTitles: async (videoTsDir) => {
+        expect(videoTsDir).toBe('F:/VIDEO_TS')
+        return [
+          { titleNumber: 1, durationSeconds: 8340, angleCount: 1, chapterCount: 52, audioTracks: [{ id: 0, label: 'English' }], subtitleTracks: [{ id: 0, label: 'English' }] },
+          { titleNumber: 2, durationSeconds: 153, angleCount: 1, chapterCount: 2, audioTracks: [{ id: 0, label: 'English' }], subtitleTracks: [] },
+        ]
+      },
+    })
+
+    const scan = await scanner.scanDisc()
+
+    expect(runProcess).not.toHaveBeenCalled()
+    expect(scan.drive).toBe('F:')
+    expect(scan.discId).toMatch(/^disc-[a-f0-9]{12}$/)
+    expect(scan.titles).toEqual([
+      { titleNumber: 1, durationSeconds: 8340, audioTracks: [{ id: 0, label: 'English' }], subtitleTracks: [{ id: 0, label: 'English' }] },
+      { titleNumber: 2, durationSeconds: 153, audioTracks: [{ id: 0, label: 'English' }], subtitleTracks: [] },
+    ])
   })
 
   it('rejects shim scan payloads that do not match the disc metadata shape', async () => {

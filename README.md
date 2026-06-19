@@ -6,7 +6,8 @@ No ripping workflow. No library management. No mystery VLC window on the client.
 
 ## What It Does ✨
 
-- Scans the inserted DVD and shows a title grid with thumbnails.
+- Auto-detects the optical drive (the one with a disc loaded) so you usually don't need to configure a drive letter.
+- Scans the inserted DVD almost instantly by reading its IFO files directly, and shows a title grid with thumbnails.
 - Highlights the likely main feature while keeping shorter extras available.
 - Lets you choose audio and subtitle burn-in options before playback starts.
 - Starts a server-owned VLC session and serves browser-safe HLS from the app.
@@ -15,7 +16,7 @@ No ripping workflow. No library management. No mystery VLC window on the client.
 - Keeps normal seeks local when the target is already buffered.
 - Restarts VLC at the requested DVD time when you jump to an unloaded area.
 - Keeps generated segments for the active session and stitches watched/jumped ranges into a cache manifest.
-- Detects stalled DVD reads, skips past bad sectors, and resumes instead of hanging forever.
+- Detects stalled DVD reads, fills unreadable sectors with a brief placeholder so the timeline stays accurate, and resumes instead of hanging forever.
 - Includes a live server log drawer so you can see what the box is doing.
 - Runs as a local-network appliance with a Windows scheduled task and firewall rule.
 
@@ -39,7 +40,7 @@ Run this from an elevated PowerShell window on the Windows PC with the DVD drive
 npm run install:windows -- -Drive F: -Port 3000 -VlcPath 'C:\Program Files\VideoLAN\VLC\vlc.exe'
 ```
 
-Use the drive letter for your DVD drive. The installer will:
+`-Drive` is optional — if you omit it (or don't set `DVD_DRIVE`), the app auto-detects the optical drive with a disc loaded. Use the drive letter for your DVD drive. The installer will:
 
 - build the app for production use
 - save the selected drive, port, and VLC path
@@ -80,26 +81,24 @@ The player page has the browser video element plus a full-title timeline.
 
 ## Scratched Disc Recovery 💪
 
-DVDs can hit bad sectors and cause VLC to stop producing new HLS data. The app watches for that.
+DVDs can hit bad sectors and cause VLC to stop producing new HLS data. The app watches for that and recovers **without distorting the timeline** — playback time always stays accurate to the DVD.
 
-If playback stalls, the server:
+The title is modelled as a fixed grid of 2-second slots, where slot *N* always represents DVD time *[(N-1)×2, N×2)*. When a read stalls, the server:
 
 1. treats the stall as a possible unreadable DVD area
-2. stops the stuck VLC process
-3. retries the same title from the last good time a few times
-4. restarts the same title about 10 seconds farther ahead if the retries keep stalling
-5. marks the HLS discontinuity
-6. tells the browser to wait for recovered stream data
+2. stops the stuck VLC process and retries the **same** spot a few times (the drive often reads through a rough patch on a second pass)
+3. if the spot stays unreadable, fills exactly that one 2-second slot with a short "bad sector" placeholder, marks an HLS discontinuity, and restarts playback at the very next slot
+4. repeats one slot at a time for as long as the disc is unreadable, then resumes normal playback the instant a readable sector returns
 
-The goal is simple: give the disc a few chances to read through a rough spot, avoid an indefinite freeze, and let the browser resume after a skipped range only when retries fail. If you manually seek back before a previously skipped area, the server starts a fresh retry sequence instead of treating the earlier skip as permanent.
+Because each unreadable slot is filled at its true position, a bad sector costs *exactly* its real length — a 6-second scratch fills 6 seconds, never a large jump. The browser plays a single server-composed manifest that stays anchored to the playback position and grows in place, so the displayed time always matches the disc. A manual seek opens a fresh region and re-reads from the target.
 
 Recovery knobs are available if you need to experiment with a difficult disc:
 
-- `SESSION_RECOVERY_STALL_MS` defaults to `10000`.
-- `SESSION_RECOVERY_RESTART_READINESS_MS` defaults to `30000`.
-- `SESSION_RECOVERY_SKIP_SECONDS` defaults to `10`.
-- `SESSION_RECOVERY_READ_RETRIES` defaults to `3`.
-- `SESSION_RECOVERY_MAX_ATTEMPTS` defaults to `6`.
+- `SESSION_RECOVERY_STALL_MS` defaults to `10000` — how long a read must be silent before it counts as stalled.
+- `SESSION_RECOVERY_RESTART_READINESS_MS` defaults to `30000` — how long a seek/start waits for fresh output.
+- `SESSION_RECOVERY_READ_RETRIES` defaults to `3` — re-read attempts at a stalled spot before filling one slot.
+- `SESSION_RECOVERY_MAX_ATTEMPTS` defaults to `6` — consecutive failed VLC restarts before giving up.
+- `SESSION_RECOVERY_SKIP_SECONDS` is retired (bad sectors are filled one slot at a time); the value is still accepted for compatibility but ignored.
 
 ## Run It Manually 🚀
 

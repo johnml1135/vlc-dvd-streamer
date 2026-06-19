@@ -41,15 +41,19 @@ export async function registerStreamRoutes(app: FastifyInstance, context: AppCon
 
     sessionManager.touch(sessionId)
 
-    if (asset === 'stitched.m3u8') {
-      const stitchedManifest = sessionManager.getStitchedManifest(sessionId)
-      if (!stitchedManifest) {
+    // The browser-facing manifests are composed server-side from the DVD-time
+    // slot grid (placeholders inline), not read raw from VLC. They already carry
+    // correctly-placed discontinuities, so no epoch-based rewrite is needed.
+    if (asset === 'index.m3u8' || asset === 'stitched.m3u8') {
+      const manifest = asset === 'index.m3u8'
+        ? sessionManager.getRegionManifest(sessionId)
+        : sessionManager.getStitchedManifest(sessionId)
+      if (!manifest) {
         return sendApiError(reply, 404, 'Stream asset not found.')
       }
 
-      const content = rewriteSessionManifest(stitchedManifest, {
+      const content = rewriteSessionManifest(manifest, {
         queryFlag: videoOnly ? 'videoOnly' : undefined,
-        recoveryEpoch: session.recovery?.epoch,
       })
       reply.header('Cache-Control', 'no-cache, no-store, must-revalidate')
       reply.type('application/vnd.apple.mpegurl').send(content)
@@ -61,7 +65,6 @@ export async function registerStreamRoutes(app: FastifyInstance, context: AppCon
       if (asset.endsWith('.m3u8')) {
         const content = rewriteSessionManifest(file.toString('utf8'), {
           queryFlag: videoOnly ? 'videoOnly' : undefined,
-          recoveryEpoch: session.recovery?.epoch,
         })
         reply.header('Cache-Control', 'no-cache, no-store, must-revalidate')
         reply.type('application/vnd.apple.mpegurl').send(content)

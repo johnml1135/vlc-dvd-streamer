@@ -49,6 +49,9 @@ export function createSessionManagerStub(overrides: Partial<SessionManagerLike> 
     getActiveSession() {
       return undefined
     },
+    getRegionManifest() {
+      return null
+    },
     getStitchedManifest() {
       return null
     },
