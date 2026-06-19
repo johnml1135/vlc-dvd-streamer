@@ -5,6 +5,7 @@ import { loadConfig } from './config.js'
 import { CatalogService } from './disc/catalog-service.js'
 import { detectOpticalDrive } from './disc/optical-drive.js'
 import { EventHub } from './events/event-hub.js'
+import { createFileLogSink } from './logging/file-log-sink.js'
 import { ServerLog } from './logging/server-log.js'
 import { SessionManager } from './session/session-manager.js'
 import { findVlc } from './vlc/find-vlc.js'
@@ -14,7 +15,10 @@ const config = loadConfig(process.env)
 await mkdir(config.cacheDir, { recursive: true })
 
 const eventHub = new EventHub()
+const fileLogSink = createFileLogSink(config.logFile ?? `${config.cacheDir}/logs/server.log`)
 const serverLog = new ServerLog(eventHub, 200, (line, entry) => {
+  fileLogSink.sink(line, entry)
+
   if (entry.level === 'error') {
     console.error(line)
     return
@@ -27,6 +31,7 @@ const serverLog = new ServerLog(eventHub, 200, (line, entry) => {
 
   console.log(line)
 })
+serverLog.info('server', `Writing server log to ${fileLogSink.path}.`)
 
 // Resolve the optical drive: an explicit DVD_DRIVE always wins; otherwise
 // auto-detect the Windows optical drive (preferring one with a disc loaded) so
@@ -113,6 +118,7 @@ const app = await buildApp({
 
 app.addHook('onClose', async () => {
   clearInterval(cleanupTimer)
+  await fileLogSink.close()
 })
 
 await app.listen({ host: config.host, port: config.port })

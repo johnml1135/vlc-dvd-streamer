@@ -135,6 +135,8 @@ Use `npm stop` to stop the background server. Use `npm run start:foreground` if 
 
 The player includes a `Server log` drawer with live events for disc scans, session startup, stream lifecycle, seek recovery, and scratched-disc handling.
 
+The same log is also appended to a file on disk so failures survive after the in-memory buffer rolls over and after the process exits. By default it is written to `.cache\logs\server.log` (override with the `LOG_FILE` environment variable). When VLC exits or crashes — for example while starting a session with subtitles — its captured stderr and exit code are recorded in this file under the `session` scope, which is the first place to look when a stream fails to start.
+
 Installed runtime files live under `.runtime`:
 
 - `.runtime\installed-settings.json`

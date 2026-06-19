@@ -8,6 +8,7 @@ describe('loadConfig', () => {
     expect(config.host).toBe('127.0.0.1')
     expect(config.port).toBe(3000)
     expect(config.cacheDir).toBe('.cache')
+    expect(config.logFile).toBe('.cache/logs/server.log')
     expect(config.vlcCandidates.length).toBeGreaterThan(0)
     expect(config.sessionReadinessTimeoutMs).toBe(120000)
     expect(config.sessionRecoveryStallMs).toBe(10000)
@@ -33,6 +34,11 @@ describe('loadConfig', () => {
     expect(config.sessionRecoverySkipSeconds).toBe(15)
     expect(config.sessionRecoveryReadRetries).toBe(5)
     expect(config.sessionRecoveryMaxAttempts).toBe(4)
+  })
+
+  it('honors an explicit LOG_FILE override and derives the default from CACHE_DIR', () => {
+    expect(loadConfig({ LOG_FILE: '/var/log/dvd.log' }).logFile).toBe('/var/log/dvd.log')
+    expect(loadConfig({ CACHE_DIR: 'C:/data' }).logFile).toBe('C:/data/logs/server.log')
   })
 
   it('rejects invalid numeric environment values', () => {

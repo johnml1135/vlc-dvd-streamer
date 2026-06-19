@@ -2,6 +2,9 @@ export interface AppConfig {
   host: string
   port: number
   cacheDir: string
+  /** Always populated by `loadConfig`; optional so partial configs (e.g. tests
+   * that build the app directly) need not supply it. */
+  logFile?: string
   vlcCandidates: string[]
   drive?: string
   minVisibleTitleDurationSeconds?: number
@@ -19,11 +22,13 @@ export interface AppConfig {
 
 export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
   const configuredVlcPath = env.VLC_PATH ?? (env.VLC_SHIM_SCRIPT ? process.execPath : undefined)
+  const cacheDir = env.CACHE_DIR ?? '.cache'
 
   return {
     host: env.HOST ?? '127.0.0.1',
     port: parsePositiveIntegerEnv(env.PORT, 'PORT', 3000, 65535),
-    cacheDir: env.CACHE_DIR ?? '.cache',
+    cacheDir,
+    logFile: env.LOG_FILE ?? `${cacheDir}/logs/server.log`,
     vlcCandidates: [
       configuredVlcPath,
       'C:/Program Files/VideoLAN/VLC/vlc.exe',

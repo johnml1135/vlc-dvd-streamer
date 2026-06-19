@@ -478,7 +478,11 @@ export class SessionManager {
 
       if (status === 'exited') {
         const result = await session.handle.completion
-        throw new Error(result.stderr || result.stdout || 'VLC exited before HLS output was ready.')
+        // Always surface the exit code/signal: on Windows a VLC crash often
+        // produces no stderr, so the code is the only diagnostic available.
+        const exit = `VLC exited before HLS output was ready (code ${result.code ?? 'null'}, signal ${result.signal ?? 'null'}).`
+        const output = result.stderr || result.stdout
+        throw new Error(output ? `${exit}\n${output}` : exit)
       }
     }
 
