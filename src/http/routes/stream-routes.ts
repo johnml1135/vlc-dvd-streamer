@@ -9,6 +9,16 @@ interface StreamParams {
   asset: string
 }
 
+function parseSegmentSlot(asset: string): number | null {
+  const match = /^segment-(\d+)\.ts$/i.exec(asset)
+  if (!match) {
+    return null
+  }
+
+  const parsed = Number(match[1])
+  return Number.isInteger(parsed) ? parsed : null
+}
+
 interface StreamQuery {
   videoOnly?: string
 }
@@ -40,6 +50,13 @@ export async function registerStreamRoutes(app: FastifyInstance, context: AppCon
     }
 
     sessionManager.touch(sessionId)
+
+    // A segment fetch tells us where playback's leading edge is, which recovery
+    // uses to decide how long it can keep retrying a stalled read.
+    const requestedSlot = parseSegmentSlot(asset)
+    if (requestedSlot !== null) {
+      sessionManager.noteClientSegmentRequest(sessionId, requestedSlot)
+    }
 
     // The browser-facing manifests are composed server-side from the DVD-time
     // slot grid (placeholders inline), not read raw from VLC. They already carry

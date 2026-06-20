@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { normalizeExit } from '../../../src/vlc/process-events.js'
-import { runManagedProcess } from '../../../src/vlc/process-supervisor.js'
+import { runManagedProcess, spawnManagedProcess } from '../../../src/vlc/process-supervisor.js'
 import { createCommandSpec } from '../../../src/vlc/command-spec.js'
 
 describe('normalizeExit', () => {
@@ -24,5 +24,22 @@ describe('runManagedProcess', () => {
     expect(result.ok).toBe(true)
     expect(result.stdout).toContain('hello-from-child')
     expect(result.stderr).toBe('')
+  })
+})
+
+describe('spawnManagedProcess hasExited', () => {
+  it('reports liveness, flipping to exited once the child closes', async () => {
+    const spec = createCommandSpec({
+      executable: process.execPath,
+      args: ['-e', 'process.exit(0)'],
+      timeoutMs: 5000,
+      label: 'liveness-smoke',
+    })
+
+    const handle = spawnManagedProcess(spec)
+    expect(handle.hasExited?.()).toBe(false)
+
+    await handle.completion
+    expect(handle.hasExited?.()).toBe(true)
   })
 })

@@ -17,6 +17,13 @@ export interface ManagedProcessHandle {
   stop: () => Promise<CompletedProcess>
   getStdout: () => string
   getStderr: () => string
+  /**
+   * Whether the process has already exited (closed or failed to start). Lets
+   * recovery distinguish "VLC is alive but stalled on a read" (worth waiting on)
+   * from "VLC has died" (must be restarted). Optional so lightweight test fakes
+   * need not implement it; callers treat an absent implementation as unknown.
+   */
+  hasExited?: () => boolean
 }
 
 export class ManagedProcessError extends Error {
@@ -124,6 +131,7 @@ export function spawnManagedProcess(spec: CommandSpec): ManagedProcessHandle {
     stop,
     getStdout: () => stdout,
     getStderr: () => stderr,
+    hasExited: () => settled,
   }
 }
 

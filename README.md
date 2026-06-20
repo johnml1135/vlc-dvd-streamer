@@ -86,8 +86,8 @@ DVDs can hit bad sectors and cause VLC to stop producing new HLS data. The app w
 The title is modelled as a fixed grid of 2-second slots, where slot *N* always represents DVD time *[(N-1)×2, N×2)*. When a read stalls, the server:
 
 1. treats the stall as a possible unreadable DVD area
-2. stops the stuck VLC process and retries the **same** spot a few times (the drive often reads through a rough patch on a second pass)
-3. if the spot stays unreadable, fills exactly that one 2-second slot with a short "bad sector" placeholder, marks an HLS discontinuity, and restarts playback at the very next slot
+2. **focuses on what plays next.** Because VLC transcodes faster than real time, a stall usually leaves a healthy buffer of already-produced content sitting ahead of the viewer. The server measures that *runway* — the gap between VLC's produced edge and the segment the browser has most recently fetched — and uses it to decide how hard to try before giving up. While the buffer is healthy it keeps retrying the **same** spot (the drive often reads through a rough patch on a later pass); if the still-running VLC simply went quiet, it is even left alone briefly to clear the hiccup itself with no disruptive restart.
+3. only when the spot stays unreadable **and** the viewer is about to catch up to it (or the retry cap is reached) does it fill exactly that one 2-second slot with a short "bad sector" placeholder, mark an HLS discontinuity, and restart playback at the very next slot
 4. repeats one slot at a time for as long as the disc is unreadable, then resumes normal playback the instant a readable sector returns
 
 Because each unreadable slot is filled at its true position, a bad sector costs *exactly* its real length — a 6-second scratch fills 6 seconds, never a large jump. The browser plays a single server-composed manifest that stays anchored to the playback position and grows in place, so the displayed time always matches the disc. A manual seek opens a fresh region and re-reads from the target.
@@ -96,7 +96,9 @@ Recovery knobs are available if you need to experiment with a difficult disc:
 
 - `SESSION_RECOVERY_STALL_MS` defaults to `10000` — how long a read must be silent before it counts as stalled.
 - `SESSION_RECOVERY_RESTART_READINESS_MS` defaults to `30000` — how long a seek/start waits for fresh output.
-- `SESSION_RECOVERY_READ_RETRIES` defaults to `3` — re-read attempts at a stalled spot before filling one slot.
+- `SESSION_RECOVERY_READ_RETRIES` defaults to `12` — max re-read attempts at a stalled spot before filling one slot. Most transient hiccups clear in one or two; the higher cap mainly helps when there is buffer to spend.
+- `SESSION_RECOVERY_SKIP_GUARD_SLOTS` defaults to `3` — buffer floor, in 2-second slots, kept ahead of the viewer. Once the runway drains to this, the server stops retrying and fills the slot just in time so playback never stalls.
+- `SESSION_RECOVERY_MAX_STALL_PATIENCE_MS` defaults to `20000` — how long a stalled-but-still-running VLC may be left to self-recover (while buffered) before the server intervenes with a restart.
 - `SESSION_RECOVERY_MAX_ATTEMPTS` defaults to `6` — consecutive failed VLC restarts before giving up.
 - `SESSION_RECOVERY_SKIP_SECONDS` is retired (bad sectors are filled one slot at a time); the value is still accepted for compatibility but ignored.
 

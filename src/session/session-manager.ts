@@ -101,7 +101,20 @@ export interface PlaybackRecoveryOptions {
   stopTimeoutMs?: number
   /** Retired: bad sectors are now filled one slot at a time, never skipped in bulk. Accepted for config compatibility. */
   skipSeconds?: number
+  /** Max VLC read-retries on a single stalled slot before giving up and marking it bad. */
   readRetryAttempts?: number
+  /**
+   * Buffer floor, in 2s slots, of already-produced content the viewer has not
+   * yet fetched. While runway exceeds this we keep retrying a stalled read;
+   * once it drains to this we skip just-in-time so the viewer never stalls.
+   */
+  skipGuardSlots?: number
+  /**
+   * How long a stalled-but-still-running VLC may be left to clear a transient
+   * read hiccup on its own (no disruptive restart) while the viewer has a
+   * healthy buffer. Capped per-tick by the actual runway.
+   */
+  maxStallPatienceMs?: number
   /** Maximum consecutive failed VLC restarts before declaring the disc unreadable. */
   maxAttempts?: number
   segmentDurationSeconds?: number
@@ -125,6 +138,8 @@ interface PlaybackRecoveryRuntime {
   consecutiveBadSlots: number
   restartFailures: number
   inBadRun: boolean
+  /** Highest segment slot the browser has fetched; the leading edge of playback. Null until the client requests its first segment. */
+  clientRequestedSlot: number | null
 }
 
 interface HlsProgress {
@@ -164,7 +179,9 @@ const DEFAULT_RECOVERY_OPTIONS = {
   restartReadinessTimeoutMs: 30000,
   stopTimeoutMs: 5000,
   skipSeconds: 10,
-  readRetryAttempts: 3,
+  readRetryAttempts: 12,
+  skipGuardSlots: 3,
+  maxStallPatienceMs: 20000,
   maxAttempts: 6,
   segmentDurationSeconds: 2,
 } satisfies Required<PlaybackRecoveryOptions>
@@ -235,6 +252,30 @@ export class SessionManager {
     }
 
     session.lastAccessedAt = new Date().toISOString()
+  }
+
+  /**
+   * Record that the browser has fetched a given segment slot. This is the only
+   * signal we have for where playback actually is, and recovery uses the gap
+   * between it and VLC's produced edge as the buffer "runway" — how long we can
+   * keep retrying a stalled read before the viewer would notice.
+   */
+  noteClientSegmentRequest(sessionId: string, slotNumber: number): void {
+    const session = this.sessions.get(sessionId)
+    if (!session || session.state === 'stopped' || session.state === 'failed') {
+      return
+    }
+
+    if (!Number.isInteger(slotNumber) || slotNumber < 0) {
+      return
+    }
+
+    const runtime = session.recoveryRuntime
+    // Track the leading edge: the browser fetches ahead to fill its buffer, so
+    // the highest slot it has asked for is the front of consumption.
+    runtime.clientRequestedSlot = runtime.clientRequestedSlot === null
+      ? slotNumber
+      : Math.max(runtime.clientRequestedSlot, slotNumber)
   }
 
   async seek(sessionId: string, input: { positionSeconds: number }): Promise<PlaybackSeekResult> {
@@ -622,8 +663,49 @@ export class SessionManager {
     }
 
     if (now - runtime.lastProgressAtMs >= recoveryOptions.stallTimeoutMs) {
+      // A still-running VLC with a healthy buffer ahead of the viewer is usually
+      // working through a transient read hiccup. Restarting it would force a
+      // discontinuity for no reason, so leave it be until either the buffer
+      // drains toward the viewer or our patience runs out.
+      if (this.shouldWaitForSelfRecovery(session, now)) {
+        return
+      }
       await this.performRecoveryStep(session)
     }
+  }
+
+  /**
+   * Runway between VLC's produced edge and the viewer, in 2s slots: how many
+   * already-produced slots the viewer has not yet fetched. Null when the client
+   * has not requested anything yet (buffer depth unknown).
+   */
+  private computeRunwaySlots(session: SessionRecord): number | null {
+    const clientSlot = session.recoveryRuntime.clientRequestedSlot
+    if (clientSlot === null) {
+      return null
+    }
+
+    const producedSlot = nextExpectedSlot(session.timelineRuntime) - 1
+    return producedSlot - clientSlot
+  }
+
+  private shouldWaitForSelfRecovery(session: SessionRecord, nowMs: number): boolean {
+    const recoveryOptions = this.getRecoveryOptions()
+    const runtime = session.recoveryRuntime
+
+    // A process that has already exited will never self-recover — restart it now.
+    if (session.handle.hasExited?.() ?? true) {
+      return false
+    }
+
+    const runwaySlots = this.computeRunwaySlots(session)
+    if (runwaySlots === null || runwaySlots <= recoveryOptions.skipGuardSlots) {
+      // Unknown buffer, or the viewer is about to catch up — act immediately.
+      return false
+    }
+
+    const stalledMs = nowMs - (runtime.lastProgressAtMs ?? nowMs)
+    return stalledMs < recoveryOptions.maxStallPatienceMs
   }
 
   private hasReachedEndOfTitle(session: SessionRecord): boolean {
@@ -651,7 +733,15 @@ export class SessionManager {
     }
 
     const readReason = describeReadError(session.handle.getStderr())
-    const shouldRetryRead = !runtime.inBadRun && runtime.consecutiveReadRetries < recoveryOptions.readRetryAttempts
+    // Keep retrying the stalled read while the viewer still has buffer to coast
+    // on (or the buffer depth is unknown); only the retry cap and a drained
+    // buffer force us to give up and mark the slot bad. This focuses effort on
+    // the content about to be played instead of skipping at the first hiccup.
+    const runwaySlots = this.computeRunwaySlots(session)
+    const runwayHealthy = runwaySlots === null || runwaySlots > recoveryOptions.skipGuardSlots
+    const shouldRetryRead = !runtime.inBadRun
+      && runtime.consecutiveReadRetries < recoveryOptions.readRetryAttempts
+      && runwayHealthy
 
     let resumeTimeSeconds: number
     if (shouldRetryRead) {
@@ -870,6 +960,9 @@ export class SessionManager {
     runtime.consecutiveBadSlots = 0
     runtime.inBadRun = false
     runtime.restartFailures = 0
+    // A seek jumps the playhead; the old high-water mark would otherwise make
+    // the new region look fully buffered. Repopulated as the client refetches.
+    runtime.clientRequestedSlot = null
     if (runtime.status === 'recovering') {
       runtime.status = 'idle'
     }
@@ -917,6 +1010,7 @@ function createInitialRecoveryRuntime(enabled: boolean): PlaybackRecoveryRuntime
     consecutiveBadSlots: 0,
     restartFailures: 0,
     inBadRun: false,
+    clientRequestedSlot: null,
   }
 }
 

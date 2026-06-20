@@ -14,7 +14,9 @@ describe('loadConfig', () => {
     expect(config.sessionRecoveryStallMs).toBe(10000)
     expect(config.sessionRecoveryRestartReadinessMs).toBe(30000)
     expect(config.sessionRecoverySkipSeconds).toBe(10)
-    expect(config.sessionRecoveryReadRetries).toBe(3)
+    expect(config.sessionRecoveryReadRetries).toBe(12)
+    expect(config.sessionRecoverySkipGuardSlots).toBe(3)
+    expect(config.sessionRecoveryMaxStallPatienceMs).toBe(20000)
     expect(config.sessionRecoveryMaxAttempts).toBe(6)
   })
 
@@ -25,6 +27,8 @@ describe('loadConfig', () => {
       SESSION_RECOVERY_RESTART_READINESS_MS: '45000',
       SESSION_RECOVERY_SKIP_SECONDS: '15',
       SESSION_RECOVERY_READ_RETRIES: '5',
+      SESSION_RECOVERY_SKIP_GUARD_SLOTS: '4',
+      SESSION_RECOVERY_MAX_STALL_PATIENCE_MS: '30000',
       SESSION_RECOVERY_MAX_ATTEMPTS: '4',
     })
 
@@ -33,6 +37,8 @@ describe('loadConfig', () => {
     expect(config.sessionRecoveryRestartReadinessMs).toBe(45000)
     expect(config.sessionRecoverySkipSeconds).toBe(15)
     expect(config.sessionRecoveryReadRetries).toBe(5)
+    expect(config.sessionRecoverySkipGuardSlots).toBe(4)
+    expect(config.sessionRecoveryMaxStallPatienceMs).toBe(30000)
     expect(config.sessionRecoveryMaxAttempts).toBe(4)
   })
 
