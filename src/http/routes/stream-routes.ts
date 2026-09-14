@@ -1,26 +1,17 @@
-import { readFile } from 'node:fs/promises'
 import type { FastifyInstance } from 'fastify'
 import type { AppContext } from '../app-types.js'
-import { isValidAssetName, isValidSessionId, parseBooleanQuery, rewriteSessionManifest, sendApiError } from '../route-utils.js'
-import { normalizeHlsTransportStream } from '../../vlc/transport-stream.js'
+import { isValidAssetName, isValidSessionId, parseBooleanQuery, sendApiError } from '../route-utils.js'
 
 interface StreamParams {
   sessionId: string
   asset: string
 }
 
-function parseSegmentSlot(asset: string): number | null {
-  const match = /^segment-(\d+)\.ts$/i.exec(asset)
-  if (!match) {
-    return null
-  }
-
-  const parsed = Number(match[1])
-  return Number.isInteger(parsed) ? parsed : null
-}
-
 interface StreamQuery {
   videoOnly?: string
+  generation?: string
+  region?: string
+  revision?: string
 }
 
 export async function registerStreamRoutes(app: FastifyInstance, context: AppContext): Promise<void> {
@@ -49,49 +40,14 @@ export async function registerStreamRoutes(app: FastifyInstance, context: AppCon
       return sendApiError(reply, 404, 'Session not found.')
     }
 
-    sessionManager.touch(sessionId)
-
-    // A segment fetch tells us where playback's leading edge is, which recovery
-    // uses to decide how long it can keep retrying a stalled read.
-    const requestedSlot = parseSegmentSlot(asset)
-    if (requestedSlot !== null) {
-      sessionManager.noteClientSegmentRequest(sessionId, requestedSlot)
-    }
-
-    // The browser-facing manifests are composed server-side from the DVD-time
-    // slot grid (placeholders inline), not read raw from VLC. They already carry
-    // correctly-placed discontinuities, so no epoch-based rewrite is needed.
-    if (asset === 'index.m3u8' || asset === 'stitched.m3u8') {
-      const manifest = asset === 'index.m3u8'
-        ? sessionManager.getRegionManifest(sessionId)
-        : sessionManager.getStitchedManifest(sessionId)
-      if (!manifest) {
-        return sendApiError(reply, 404, 'Stream asset not found.')
-      }
-
-      const content = rewriteSessionManifest(manifest, {
-        queryFlag: videoOnly ? 'videoOnly' : undefined,
-      })
-      reply.header('Cache-Control', 'no-cache, no-store, must-revalidate')
-      reply.type('application/vnd.apple.mpegurl').send(content)
-      return
-    }
-
-    try {
-      const file = await readFile(`${session.outputDir}/${asset}`)
-      if (asset.endsWith('.m3u8')) {
-        const content = rewriteSessionManifest(file.toString('utf8'), {
-          queryFlag: videoOnly ? 'videoOnly' : undefined,
-        })
-        reply.header('Cache-Control', 'no-cache, no-store, must-revalidate')
-        reply.type('application/vnd.apple.mpegurl').send(content)
-        return
-      }
-
-      const content = normalizeHlsTransportStream(file, { includeAudio: !videoOnly })
-      reply.type('video/mp2t').send(content)
-    } catch {
-      return sendApiError(reply, 404, 'Stream asset not found.')
-    }
+    const content = await sessionManager.readStreamAsset(sessionId, asset, {
+      videoOnly,
+      generation: request.query.generation,
+      region: request.query.region,
+      revision: request.query.revision,
+    })
+    if (!content) return sendApiError(reply, 404, 'Stream asset not found.')
+    reply.header('Cache-Control', 'no-cache, no-store, must-revalidate')
+    return reply.type(content.kind === 'playlist' ? 'application/vnd.apple.mpegurl' : 'video/mp2t').send(content.content)
   })
 }

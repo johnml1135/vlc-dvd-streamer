@@ -10,52 +10,6 @@ export function appendStreamFlag(url: string, key: string, enabled: boolean): st
   return `${url}${url.includes('?') ? '&' : '?'}${key}=1`
 }
 
-export function rewriteManifest(manifest: string, key: string): string {
-  return rewriteSessionManifest(manifest, { queryFlag: key })
-}
-
-export interface SessionManifestRewriteOptions {
-  queryFlag?: string
-  recoveryEpoch?: number
-}
-
-export function rewriteSessionManifest(manifest: string, options: SessionManifestRewriteOptions = {}): string {
-  const shouldMarkDiscontinuity = typeof options.recoveryEpoch === 'number' && options.recoveryEpoch > 0
-  let insertedDiscontinuitySequence = false
-  let insertedDiscontinuity = false
-
-  return manifest
-    .split(/\r?\n/)
-    .flatMap((line) => {
-      if (line.startsWith('#EXT-X-DISCONTINUITY-SEQUENCE')) {
-        return shouldMarkDiscontinuity ? [] : [line]
-      }
-
-      const rewrittenLines: string[] = [line]
-
-      if (shouldMarkDiscontinuity && !insertedDiscontinuitySequence && line.startsWith('#EXTM3U')) {
-        rewrittenLines.push(`#EXT-X-DISCONTINUITY-SEQUENCE:${options.recoveryEpoch}`)
-        insertedDiscontinuitySequence = true
-      }
-
-      if (!line || line.startsWith('#')) {
-        return rewrittenLines
-      }
-
-      if (shouldMarkDiscontinuity && !insertedDiscontinuity) {
-        rewrittenLines.splice(rewrittenLines.length - 1, 0, '#EXT-X-DISCONTINUITY')
-        insertedDiscontinuity = true
-      }
-
-      const mediaLine = options.queryFlag
-        ? `${line}${line.includes('?') ? '&' : '?'}${options.queryFlag}=1`
-        : line
-      rewrittenLines[rewrittenLines.length - 1] = mediaLine
-      return rewrittenLines
-    })
-    .join('\n')
-}
-
 export function isValidSessionId(sessionId: string): boolean {
   return /^[a-z0-9-]+$/i.test(sessionId)
 }

@@ -4,6 +4,8 @@ This document keeps the development workflow out of the user-facing README.
 
 ## Local Development
 
+Use Node.js 22.13 or newer. In source execution, the explicit browser asset routes strip TypeScript syntax; built execution serves the JavaScript emitted by `tsc`. Both use the same browser modules without a separate bundler.
+
 Install dependencies and run the app with the fake VLC shim when you want the full browser flow without a physical DVD drive:
 
 ```powershell
@@ -62,12 +64,26 @@ Useful environment knobs include:
 
 - App factory: [../src/app.ts](../src/app.ts)
 - Production wiring: [../src/server.ts](../src/server.ts)
-- Session lifecycle and seek timeline: [../src/session/session-manager.ts](../src/session/session-manager.ts)
+- Session selection, reuse and inactivity: [../src/session/session-manager.ts](../src/session/session-manager.ts)
+- Serialized playback lifecycle and worker ownership: [../src/session/playback-session.ts](../src/session/playback-session.ts)
+- Monotonic recovery deadlines and scheduling: [../src/session/playback-time.ts](../src/session/playback-time.ts)
+- Current browser runway and download fallback: [../src/session/runway-evidence.ts](../src/session/runway-evidence.ts)
+- Immutable HLS assets and versioned playlists: [../src/session/hls-publication.ts](../src/session/hls-publication.ts)
 - VLC command construction: [../src/vlc/args.ts](../src/vlc/args.ts)
 - VLC worker boundary: [../src/vlc/worker.ts](../src/vlc/worker.ts)
 - Stream routes: [../src/http/routes/stream-routes.ts](../src/http/routes/stream-routes.ts)
 - API routes: [../src/http/routes/api-routes.ts](../src/http/routes/api-routes.ts)
 - Browser UI rendering: [../src/ui/page.ts](../src/ui/page.ts)
+- Browser playback and title-time seeks: [../src/ui/browser-playback.ts](../src/ui/browser-playback.ts)
+- Shared browser event transport: [../src/ui/browser-events.ts](../src/ui/browser-events.ts)
+- Shared server/browser time formatting: [../src/shared/format-clock.ts](../src/shared/format-clock.ts)
+- Pure HLS manifest transformations: [../src/media/hls-manifest.ts](../src/media/hls-manifest.ts)
+
+Publication uses private output directories for each VLC run and publishes complete assets before advertising them. A published slot keeps its first bytes for the session, including a bad-sector placeholder. Explicit seeks create a new region URL; recovery appends to the current region. See the [publication research](research/2026-09-14-hls-publication.md) and [browser research](research/2026-09-14-browser-playback.md) for the source evidence and tradeoffs.
+
+Recovery treats an elapsed deadline as a reason to inspect output. Before replacing a missing segment, the session closes the worker and checks its final output. Recovery decisions are cancelled by newer seek or stop intent. The [recovery design](superpowers/specs/2026-09-14-recovery-design.md) and [timing research](research/2026-09-14-recovery-timing.md) explain these ordering guarantees.
+
+`SessionManagerOptions.time` supplies elapsed time and scheduling together. Tests use the manual adapter in `test/helpers/manual-playback-time.ts` to advance recovery deadlines while retaining real filesystem operations. `SessionManagerOptions.now` supplies calendar timestamps and activity times; changing it does not advance recovery. Browser feedback is qualified by the current region and expires after five seconds; current-region segment downloads provide a fallback when feedback is unavailable.
 
 ## Planning And Specs
 

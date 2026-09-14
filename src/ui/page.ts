@@ -1,3 +1,4 @@
+import { formatClock } from '../shared/format-clock.js'
 import type { CatalogSnapshot, DiscTitle } from '../disc/types.js'
 import type { PlaybackSession } from '../session/session-manager.js'
 
@@ -59,8 +60,9 @@ export function renderPlayerPage(input: PlayerPageInput): string {
           <p class="meta-label">Manifest URL</p>
           <a class="manifest-link" href="${escapeHtml(manifestUrl)}">${escapeHtml(manifestUrl)}</a>
         </div>
-        <video id="player" controls playsinline muted data-manifest-url="${escapeHtml(manifestUrl)}" data-session-id="${escapeHtml(session.id)}" data-duration-seconds="${durationSeconds}" data-epoch-start-seconds="${currentRange.startSeconds}" data-recovery-epoch="${recoveryEpoch}"></video>
-        <p id="player-status" class="player-status">Attaching HLS stream...</p>
+        <video id="player" controls playsinline muted data-manifest-url="${escapeHtml(manifestUrl)}" data-session-manifest-url="${escapeHtml(session.manifestUrl)}" data-session-id="${escapeHtml(session.id)}" data-duration-seconds="${durationSeconds}" data-epoch-start-seconds="${currentRange.startSeconds}" data-recovery-epoch="${recoveryEpoch}"></video>
+        <p id="player-status" class="player-status" role="status">Attaching HLS stream...</p>
+        <button id="retry-playback" type="button" hidden>Retry playback</button>
         <div class="title-timeline" data-stitched-manifest-url="${escapeHtml(stitchedManifestUrl)}">
           <div class="title-timeline-row">
             <label for="title-seek">Title position</label>
@@ -79,308 +81,7 @@ export function renderPlayerPage(input: PlayerPageInput): string {
           </form>
         </div>
       </section>
-      <script type="module">
-        const video = document.getElementById('player')
-        const status = document.getElementById('player-status')
-        const manifestUrl = video && video.dataset ? video.dataset.manifestUrl : undefined
-        const sessionId = video && video.dataset ? video.dataset.sessionId : undefined
-        const durationSeconds = video && video.dataset ? Number(video.dataset.durationSeconds || '0') : 0
-        const seekControl = document.getElementById('title-seek')
-        const titleCurrentTime = document.getElementById('title-current-time')
-        const bufferedSummary = document.getElementById('title-buffered-summary')
-        let epochStartSeconds = video && video.dataset ? Number(video.dataset.epochStartSeconds || '0') : 0
-        let activeHls = null
-        let nativeHlsActive = false
-        let playbackManifestUrl = manifestUrl
-        let shouldResetPlaybackToZero = true
-        let activeRecoveryEpoch = video && video.dataset ? Number(video.dataset.recoveryEpoch || '0') : 0
-
-        function appendStreamFlag(url, key) {
-          if (url.indexOf(key + '=1') !== -1) {
-            return url
-          }
-
-          return url + (url.includes('?') ? '&' : '?') + key + '=1'
-        }
-
-        function appendReloadToken(url) {
-          return url + (url.includes('?') ? '&' : '?') + 'reload=' + Date.now()
-        }
-
-        function formatClock(totalSeconds) {
-          const safeSeconds = Number.isFinite(totalSeconds) && totalSeconds > 0 ? Math.floor(totalSeconds) : 0
-          const hours = Math.floor(safeSeconds / 3600)
-          const minutes = Math.floor((safeSeconds % 3600) / 60)
-          const seconds = safeSeconds % 60
-          if (hours > 0) {
-            return hours + ':' + String(minutes).padStart(2, '0') + ':' + String(seconds).padStart(2, '0')
-          }
-
-          return minutes + ':' + String(seconds).padStart(2, '0')
-        }
-
-        function currentTitleSeconds() {
-          return epochStartSeconds + (video ? video.currentTime : 0)
-        }
-
-        function isTitleTimeBuffered(titleSeconds) {
-          if (!video || !Number.isFinite(titleSeconds)) {
-            return false
-          }
-
-          for (let index = 0; index < video.buffered.length; index += 1) {
-            const startSeconds = epochStartSeconds + video.buffered.start(index)
-            const endSeconds = epochStartSeconds + video.buffered.end(index)
-            if (titleSeconds >= startSeconds && titleSeconds <= endSeconds) {
-              return true
-            }
-          }
-
-          return false
-        }
-
-        function updateTimelineUi() {
-          if (titleCurrentTime) {
-            titleCurrentTime.textContent = formatClock(currentTitleSeconds())
-          }
-
-          if (seekControl && document.activeElement !== seekControl) {
-            seekControl.value = String(Math.min(durationSeconds || currentTitleSeconds(), currentTitleSeconds()))
-          }
-
-          if (bufferedSummary && video) {
-            const ranges = []
-            for (let index = 0; index < video.buffered.length; index += 1) {
-              ranges.push(formatClock(epochStartSeconds + video.buffered.start(index)) + '-' + formatClock(epochStartSeconds + video.buffered.end(index)))
-            }
-            bufferedSummary.textContent = ranges.length > 0
-              ? 'Buffered: ' + ranges.join(', ')
-              : 'Buffering current title range'
-          }
-        }
-
-        function recoveryEpochFromSession(session) {
-          const epoch = session && session.recovery ? Number(session.recovery.epoch) : NaN
-          return Number.isFinite(epoch) ? epoch : null
-        }
-
-        function applySessionTimeline(session) {
-          if (!session || !session.timeline) {
-            return
-          }
-
-          if (session.timeline.currentRange && typeof session.timeline.currentRange.startSeconds === 'number') {
-            epochStartSeconds = session.timeline.currentRange.startSeconds
-            if (video && video.dataset) {
-              video.dataset.epochStartSeconds = String(epochStartSeconds)
-            }
-          }
-
-          const recoveryEpoch = recoveryEpochFromSession(session)
-          if (recoveryEpoch !== null) {
-            activeRecoveryEpoch = recoveryEpoch
-            if (video && video.dataset) {
-              video.dataset.recoveryEpoch = String(activeRecoveryEpoch)
-            }
-          }
-
-          updateTimelineUi()
-        }
-
-        function syncRecoveredSession(payload) {
-          if (!payload || typeof payload !== 'object' || payload.sessionId !== sessionId) {
-            return
-          }
-
-          // The browser plays a server-composed manifest that stays anchored to
-          // the region start and grows in place (bad sectors are filled inline),
-          // so recovery never needs a source reload or a playback-time reset.
-          // Only a user seek opens a new region and reloads.
-          applySessionTimeline(payload.session)
-        }
-
-        function seekWithinCurrentMedia(titleSeconds) {
-          if (!video) {
-            return
-          }
-
-          video.currentTime = Math.max(0, titleSeconds - epochStartSeconds)
-          updateTimelineUi()
-        }
-
-        function reloadPlaybackSource() {
-          if (!video || !playbackManifestUrl) {
-            return
-          }
-
-          shouldResetPlaybackToZero = true
-          const nextUrl = appendReloadToken(playbackManifestUrl)
-          if (activeHls && typeof activeHls.loadSource === 'function') {
-            activeHls.loadSource(nextUrl)
-            if (typeof activeHls.startLoad === 'function') {
-              activeHls.startLoad(0)
-            }
-            return
-          }
-
-          if (nativeHlsActive) {
-            video.src = nextUrl
-            video.load()
-          }
-        }
-
-        function resetPlaybackToWindowStart() {
-          if (!video || !shouldResetPlaybackToZero) {
-            return
-          }
-
-          try {
-            video.currentTime = 0
-            shouldResetPlaybackToZero = false
-            updateTimelineUi()
-          } catch {
-          }
-        }
-
-        async function seekTitleTo(titleSeconds) {
-          if (!video || !status || !sessionId || !Number.isFinite(titleSeconds)) {
-            return
-          }
-
-          if (isTitleTimeBuffered(titleSeconds)) {
-            seekWithinCurrentMedia(titleSeconds)
-            status.textContent = 'Playing from the existing buffer.'
-            return
-          }
-
-          status.textContent = 'Seeking to ' + formatClock(titleSeconds) + ' and buffering from the DVD.'
-          const response = await fetch('/api/sessions/' + sessionId + '/seek', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ positionSeconds: titleSeconds }),
-          })
-          if (!response.ok) {
-            status.textContent = 'Could not seek to ' + formatClock(titleSeconds) + '.'
-            return
-          }
-
-          const result = await response.json()
-          applySessionTimeline(result.session)
-          if (result.action === 'already-available') {
-            seekWithinCurrentMedia(result.positionSeconds)
-            status.textContent = 'Playing from the current HLS window.'
-            return
-          }
-
-          reloadPlaybackSource()
-          status.textContent = 'Buffering from ' + formatClock(result.positionSeconds) + '.'
-        }
-
-        async function attachStream() {
-          if (!video || !manifestUrl || !status) {
-            return
-          }
-
-          const userAgent = navigator.userAgent
-          const isEmbeddedCodeBrowser = userAgent.includes('Code/')
-          const isChromiumBrowser = /Chrom(e|ium)|Edg|OPR|Electron/.test(userAgent) || isEmbeddedCodeBrowser
-          const prefersNativeHls = video.canPlayType('application/vnd.apple.mpegurl')
-            && /Safari\\//.test(userAgent)
-            && !isChromiumBrowser
-          playbackManifestUrl = isEmbeddedCodeBrowser
-            ? appendStreamFlag(manifestUrl, 'videoOnly')
-            : manifestUrl
-
-          try {
-            const module = await import('/assets/hls.mjs')
-            const Hls = module.default
-
-            if (!prefersNativeHls && Hls && typeof Hls.isSupported === 'function' && Hls.isSupported()) {
-              const hls = new Hls({
-                startPosition: 0,
-                liveMaxUnchangedPlaylistRefresh: 3,
-                detectStallWithCurrentTimeMs: 1250,
-                highBufferWatchdogPeriod: 2,
-                nudgeMaxRetry: 5,
-                handleMpegTsVideoIntegrityErrors: 'skip',
-                fragLoadPolicy: {
-                  default: {
-                    maxTimeToFirstByteMs: 10000,
-                    maxLoadTimeMs: 30000,
-                    timeoutRetry: { maxNumRetry: 2, retryDelayMs: 0, maxRetryDelayMs: 1000 },
-                    errorRetry: { maxNumRetry: 3, retryDelayMs: 1000, maxRetryDelayMs: 4000, backoff: 'linear' },
-                  },
-                },
-              })
-              activeHls = hls
-              let lastMediaRecoveryAt = 0
-              if (Hls.Events && Hls.Events.MANIFEST_PARSED) {
-                hls.on(Hls.Events.MANIFEST_PARSED, resetPlaybackToWindowStart)
-              }
-              hls.on(Hls.Events.ERROR, (_event, data) => {
-                if (!data || !status) {
-                  return
-                }
-
-                if (data.type === Hls.ErrorTypes.MEDIA_ERROR && data.fatal) {
-                  const now = Date.now()
-                  if (now - lastMediaRecoveryAt > 5000 && typeof hls.recoverMediaError === 'function') {
-                    lastMediaRecoveryAt = now
-                    status.textContent = 'Recovering the video decoder after a stream discontinuity.'
-                    hls.recoverMediaError()
-                  }
-                  return
-                }
-
-                if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-                  status.textContent = 'Waiting for recovered HLS data from the server.'
-                  if (data.fatal && typeof hls.startLoad === 'function') {
-                    hls.startLoad(-1)
-                  }
-                }
-              })
-              hls.loadSource(playbackManifestUrl)
-              hls.attachMedia(video)
-              status.textContent = isEmbeddedCodeBrowser
-                ? 'Using hls.js fallback without audio in the embedded browser.'
-                : 'Using hls.js fallback.'
-              return
-            }
-          } catch (error) {
-            // Fall back to a clear message below.
-          }
-
-          if (prefersNativeHls) {
-            nativeHlsActive = true
-            video.src = playbackManifestUrl
-            status.textContent = 'Using native HLS support.'
-            return
-          }
-
-          status.textContent = 'Manifest is ready. This browser needs native HLS or hls.js support to render the stream.'
-        }
-
-        void attachStream()
-        window.addEventListener('vlc-dvd-streamer:session-recovery', (event) => {
-          syncRecoveredSession(event.detail)
-        })
-        if (video) {
-          video.addEventListener('timeupdate', updateTimelineUi)
-          video.addEventListener('progress', updateTimelineUi)
-          video.addEventListener('loadedmetadata', resetPlaybackToWindowStart)
-          video.addEventListener('playing', resetPlaybackToWindowStart)
-        }
-        if (seekControl) {
-          seekControl.addEventListener('input', () => {
-            if (titleCurrentTime) {
-              titleCurrentTime.textContent = formatClock(Number(seekControl.value))
-            }
-          })
-          seekControl.addEventListener('change', () => {
-            void seekTitleTo(Number(seekControl.value))
-          })
-        }
-      </script>
+      <script type="module" src="/assets/browser-playback.js"></script>
     `,
   })
 }
@@ -724,6 +425,10 @@ function renderLayout(input: {
       }
 
       .manifest-link,
+      #retry-playback[hidden] {
+        display: none;
+      }
+
       .player-status {
         color: var(--muted);
       }
@@ -805,11 +510,12 @@ function renderLayout(input: {
         <p class="log-help">Live server events for disc scans, session startup, and stream lifecycle.</p>
         <pre id="server-log-output" class="log-output">Loading server log...</pre>
       </details>
-      <script>
+      <script type="module">
+        import { subscribeAppEvents } from '/assets/browser-events.js'
+
         const logOutput = document.getElementById('server-log-output')
         const logDrawer = document.querySelector('.log-drawer')
         const logDrawerStorageKey = 'vlc-dvd-streamer:server-log-open'
-        const playerStatus = document.getElementById('player-status')
 
         function saveLogDrawerState() {
           if (!logDrawer) {
@@ -891,31 +597,6 @@ function renderLayout(input: {
           logOutput.textContent = existingLines.slice(-200).join('\\n')
           logOutput.scrollTop = logOutput.scrollHeight
         }
-
-        function describeRecoveryEvent(payload) {
-          if (!payload || typeof payload !== 'object') {
-            return ''
-          }
-
-          if (typeof payload.message === 'string' && payload.message.length > 0) {
-            return payload.message
-          }
-
-          if (payload.status === 'recovering') {
-            return 'Unreadable DVD area detected. Skipping ahead while the server rebuilds the stream.'
-          }
-
-          if (payload.status === 'idle' && typeof payload.skippedSeconds === 'number' && payload.skippedSeconds > 0) {
-            return 'Recovered playback after skipping ' + payload.skippedSeconds + ' seconds of unreadable DVD data.'
-          }
-
-          if (payload.status === 'exhausted') {
-            return 'Playback stopped because the DVD stayed unreadable after repeated skip attempts.'
-          }
-
-          return ''
-        }
-
         async function loadServerLogs() {
           if (!logOutput) {
             return
@@ -935,41 +616,18 @@ function renderLayout(input: {
 
         function connectServerLogStream() {
           if (!logOutput) {
-            return
+            return () => {}
           }
 
-          const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws'
-          const socket = new WebSocket(protocol + '://' + window.location.host + '/ws')
-
-          socket.addEventListener('message', (messageEvent) => {
-            let event
-            try {
-              event = JSON.parse(messageEvent.data)
-            } catch {
-              return
-            }
-
-            if (!event || typeof event.type !== 'string') {
-              return
-            }
-
+          return subscribeAppEvents((event) => {
             if (event.type === 'server.log') {
               appendLogEntry(event.payload)
               return
             }
 
-            if (event.type === 'session.recovery') {
-              const recoveryText = describeRecoveryEvent(event.payload)
-              if (playerStatus && recoveryText) {
-                playerStatus.textContent = recoveryText
-              }
-              window.dispatchEvent(new CustomEvent('vlc-dvd-streamer:session-recovery', { detail: event.payload }))
-              return
-            }
-
             if (event.type === 'catalog.updated' && window.location.pathname === '/') {
               const payload = event.payload
-              if (payload && typeof payload.state === 'string' && payload.state !== 'empty' && payload.state !== 'no_drive') {
+              if (payload && typeof payload === 'object' && 'state' in payload && typeof payload.state === 'string' && payload.state !== 'empty' && payload.state !== 'no_drive') {
                 window.location.reload()
               }
             }
@@ -978,7 +636,12 @@ function renderLayout(input: {
 
         restoreLogDrawerState()
         void loadServerLogs()
-        connectServerLogStream()
+        const disconnectServerLogStream = connectServerLogStream()
+        window.addEventListener('pagehide', disconnectServerLogStream, { once: true })
+        // Reload restores playback and logs after BFCache disposal, using fresh server state.
+        window.addEventListener('pageshow', (event) => {
+          if (event.persisted) window.location.reload()
+        })
       </script>
     </main>
   </body>
@@ -999,19 +662,6 @@ function formatDuration(totalSeconds: number): string {
   }
 
   return `${seconds}s`
-}
-
-function formatClock(totalSeconds: number): string {
-  const safeSeconds = Number.isFinite(totalSeconds) && totalSeconds > 0 ? Math.floor(totalSeconds) : 0
-  const hours = Math.floor(safeSeconds / 3600)
-  const minutes = Math.floor((safeSeconds % 3600) / 60)
-  const seconds = safeSeconds % 60
-
-  if (hours > 0) {
-    return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
-  }
-
-  return `${minutes}:${String(seconds).padStart(2, '0')}`
 }
 
 function escapeHtml(value: string): string {

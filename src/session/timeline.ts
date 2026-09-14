@@ -21,6 +21,8 @@ interface SlotInfo {
   source: SlotSource
   /** Discontinuity group: the VLC epoch that produced a generated slot, or BAD_SLOT_GROUP. */
   group: number
+  assetUri?: string
+  durationSeconds?: number
 }
 
 export interface PlaybackTimelineSnapshot {
@@ -114,6 +116,11 @@ export function markBadSlot(runtime: PlaybackTimelineRuntime, slotNumber: number
   if (Number.isInteger(slotNumber) && slotNumber >= 1) {
     runtime.slots.set(slotNumber, { source: 'bad', group: BAD_SLOT_GROUP })
   }
+}
+
+/** Publication records only complete, immutable assets. */
+export function publishSlot(runtime: PlaybackTimelineRuntime, slotNumber: number, info: SlotInfo): void {
+  runtime.slots.set(slotNumber, { ...info })
 }
 
 /** Slots of the current contiguous region, starting at regionStartSlot. */
@@ -217,7 +224,8 @@ function buildManifest(
       }
     }
 
-    lines.push(`#EXTINF:${segmentDurationSeconds},`, formatSegmentName(slotNumber))
+    const info = runtime.slots.get(slotNumber)
+    lines.push(`#EXTINF:${info?.durationSeconds ?? segmentDurationSeconds},`, info?.assetUri ?? formatSegmentName(slotNumber))
   })
 
   if (options.endlist) {

@@ -1,8 +1,9 @@
-import { access, mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { SessionManager } from '../../src/session/session-manager.js'
+import { ManualPlaybackTime } from '../helpers/manual-playback-time.js'
 import type { CompletedProcess, ManagedProcessHandle } from '../../src/vlc/process-supervisor.js'
 import type { StartHlsSessionInput, StartHlsSessionResult } from '../../src/vlc/worker.js'
 
@@ -19,13 +20,12 @@ const SEGMENT_DURATION_SECONDS = 2
  */
 class ScratchedDiscWorker {
   readonly starts: StartHlsSessionInput[] = []
-  private readonly timers = new Set<NodeJS.Timeout>()
+  private active?: { outputDir: string; fromSlot: number; latest: number; maxSlot: number; handle: IntervalHandle }
 
   constructor(
     private readonly badStartSeconds: number,
     private readonly badEndSeconds: number,
     private readonly durationSeconds: number,
-    private readonly advanceMs = 8,
   ) {}
 
   private slot(timeSeconds: number): number {
@@ -51,30 +51,22 @@ class ScratchedDiscWorker {
 
     // Otherwise play forward, stopping at the scratch boundary if we run into it.
     const maxSlot = startSlot < badStartSlot ? badStartSlot - 1 : lastSlot
-    let latest = startSlot
-    await this.writeManifest(input.outputDir, startSlot, latest)
-    if (latest < maxSlot) {
-      const timer = setInterval(() => {
-        latest += 1
-        void this.writeManifest(input.outputDir, startSlot, latest)
-        if (latest >= maxSlot) {
-          clearInterval(timer)
-          this.timers.delete(timer)
-          handle.timer = undefined
-        }
-      }, this.advanceMs)
-      handle.timer = timer
-      this.timers.add(timer)
-    }
+    await this.writeManifest(input.outputDir, startSlot, startSlot)
+    this.active = { outputDir: input.outputDir, fromSlot: startSlot, latest: startSlot, maxSlot, handle }
 
     return { manifestPath, handle }
   }
 
+  async produceThrough(slotNumber: number): Promise<void> {
+    const active = this.active
+    if (!active || active.handle.hasExited()) return
+    const latest = Math.min(active.maxSlot, Math.max(active.latest, slotNumber))
+    if (latest === active.latest) return
+    await this.writeManifest(active.outputDir, active.fromSlot, latest)
+    active.latest = latest
+  }
+
   async dispose(): Promise<void> {
-    for (const timer of this.timers) {
-      clearInterval(timer)
-    }
-    this.timers.clear()
   }
 
   /** Distinct resume points VLC was restarted at, in call order. */
@@ -109,8 +101,8 @@ class ScratchedDiscWorker {
 
 class IntervalHandle implements ManagedProcessHandle {
   readonly pid = 4321
-  timer?: NodeJS.Timeout
   stderr = ''
+  private exited = false
   readonly completion = new Promise<CompletedProcess>(() => {})
 
   getStdout(): string {
@@ -122,12 +114,11 @@ class IntervalHandle implements ManagedProcessHandle {
   }
 
   async stop(): Promise<CompletedProcess> {
-    if (this.timer) {
-      clearInterval(this.timer)
-      this.timer = undefined
-    }
+    this.exited = true
     return { ok: true, timedOut: false, code: 0, signal: null, stdout: '', stderr: this.stderr }
   }
+
+  hasExited(): boolean { return this.exited }
 }
 
 describe('SessionManager bad-sector recovery', () => {
@@ -135,10 +126,12 @@ describe('SessionManager bad-sector recovery', () => {
     const cacheDir = await mkdtemp(join(tmpdir(), 'vlc-dvd-streamer-bad-fill-'))
     const events: Array<{ type: string; payload: unknown }> = []
     const worker = new ScratchedDiscWorker(8, 14, 40)
+    const time = new ManualPlaybackTime()
     const manager = new SessionManager({
       cacheDir,
       inactivityMs: 60_000,
       worker,
+      time,
       playbackRecovery: {
         stallTimeoutMs: 60,
         monitorIntervalMs: 15,
@@ -160,12 +153,17 @@ describe('SessionManager bad-sector recovery', () => {
         durationSeconds: 40,
       })
       expect(session.state).toBe('ready')
+      await time.waitForScheduledTask()
+      await worker.produceThrough(4)
 
-      // Wait until the scratch [8s, 14s) has been fully filled and playback resumed.
-      await waitFor(() => {
+      // Drive the monitor and producer explicitly until the scratch [8s, 14s)
+      // has been fully filled and playback resumes.
+      for (let tick = 0; tick < 100; tick += 1) {
+        await time.advanceBy(15)
+        if (worker.starts.at(-1)?.initialSegmentNumber === 8) await worker.produceThrough(20)
         const recovery = manager.getSession(session.id)?.recovery
-        return recovery?.status === 'idle' && recovery.skippedSeconds === 6
-      }, 6000)
+        if (recovery?.status === 'idle' && recovery.skippedSeconds === 6) break
+      }
 
       const recovered = manager.getSession(session.id)
       expect(recovered?.state).toBe('ready')
@@ -175,10 +173,10 @@ describe('SessionManager bad-sector recovery', () => {
         { startSeconds: 8, endSeconds: 14, reason: 'dvd-read-stall' },
       ])
 
-      // Each placeholder slot exists on disk for the composed manifest to serve.
-      await access(join(recovered?.outputDir ?? '', 'segment-000005.ts'))
-      await access(join(recovered?.outputDir ?? '', 'segment-000006.ts'))
-      await access(join(recovered?.outputDir ?? '', 'segment-000007.ts'))
+      // Every advertised placeholder resolves through the same interface as playback.
+      for (const name of ['segment-000005.ts', 'segment-000006.ts', 'segment-000007.ts']) {
+        expect(await manager.readStreamAsset(session.id, name, { generation: 'placeholder' })).not.toBeNull()
+      }
 
       // The anti-runaway invariant: after playing up to the scratch at 8s, the
       // server only ever advanced the resume point one 2s slot at a time.
@@ -202,12 +200,9 @@ describe('SessionManager bad-sector recovery', () => {
       })
       expect(retryEvent).toBeDefined()
 
-      // Eventually the whole 40s title is cached and exposed as a complete VOD,
-      // total duration intact despite the scratch.
-      await waitFor(() => {
-        const recovery = manager.getSession(session.id)?.recovery
-        return (recovery?.lastGoodTimeSeconds ?? 0) >= 40
-      }, 6000)
+      // The whole 40s title is cached and exposed as a complete VOD, total
+      // duration intact despite the scratch.
+      expect(recovered?.recovery?.lastGoodTimeSeconds).toBeGreaterThanOrEqual(40)
       const stitched = manager.getStitchedManifest(session.id) ?? ''
       expect(stitched).toContain('#EXT-X-PLAYLIST-TYPE:VOD')
       expect(stitched).toContain('#EXT-X-ENDLIST')
@@ -215,15 +210,17 @@ describe('SessionManager bad-sector recovery', () => {
       await worker.dispose()
       await manager.stopAll()
     }
-  }, 15_000)
+  })
 
   it('abandons an in-progress bad-sector fill when the user seeks to a clean area', async () => {
     const cacheDir = await mkdtemp(join(tmpdir(), 'vlc-dvd-streamer-seek-clean-'))
     const worker = new ScratchedDiscWorker(8, 14, 40)
+    const time = new ManualPlaybackTime()
     const manager = new SessionManager({
       cacheDir,
       inactivityMs: 60_000,
       worker,
+      time,
       playbackRecovery: {
         stallTimeoutMs: 60,
         monitorIntervalMs: 15,
@@ -241,9 +238,15 @@ describe('SessionManager bad-sector recovery', () => {
         titleNumber: 1,
         durationSeconds: 40,
       })
+      await time.waitForScheduledTask()
+      await worker.produceThrough(4)
 
       // Let it hit the scratch and begin filling it.
-      await waitFor(() => (manager.getSession(session.id)?.recovery?.skippedSeconds ?? 0) >= 2, 6000)
+      for (let tick = 0; tick < 100; tick += 1) {
+        await time.advanceBy(15)
+        if ((manager.getSession(session.id)?.recovery?.skippedSeconds ?? 0) >= 2) break
+      }
+      expect(manager.getSession(session.id)?.recovery?.skippedSeconds).toBeGreaterThanOrEqual(2)
 
       // Seek forward to a clean, unbuffered area (24s, past the scratch). This
       // opens a brand-new region anchored at the target and abandons the bad run.
@@ -256,10 +259,11 @@ describe('SessionManager bad-sector recovery', () => {
       const filledAtSeek = manager.getSession(session.id)?.recovery?.skippedSeconds ?? 0
       expect(filledAtSeek).toBeGreaterThanOrEqual(2)
       expect(filledAtSeek).toBeLessThanOrEqual(6)
+      await worker.produceThrough(20)
+      await time.advanceBy(15)
 
       // ...and playback runs cleanly to the end. Because we jumped past the
       // scratch, the abandoned bad run stops growing — no further fills happen.
-      await waitFor(() => manager.getSession(session.id)?.recovery?.status === 'idle', 6000)
       const recovery = manager.getSession(session.id)?.recovery
       expect(recovery?.status).toBe('idle')
       expect(recovery?.skippedSeconds).toBe(filledAtSeek)
@@ -267,20 +271,8 @@ describe('SessionManager bad-sector recovery', () => {
       await worker.dispose()
       await manager.stopAll()
     }
-  }, 15_000)
+  })
 })
-
-async function waitFor(condition: () => boolean, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    if (condition()) {
-      return
-    }
-    await new Promise((resolve) => setTimeout(resolve, 15))
-  }
-
-  throw new Error('Timed out waiting for condition.')
-}
 
 function formatSegmentName(slotNumber: number): string {
   return `segment-${String(slotNumber).padStart(6, '0')}.ts`

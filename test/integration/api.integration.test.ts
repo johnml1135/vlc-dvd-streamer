@@ -156,11 +156,23 @@ describe('app API', () => {
 
       const videoOnlyManifest = await app.inject({
         method: 'GET',
-        url: `${started.json().manifestUrl}?videoOnly=1`,
+        url: `${started.json().manifestUrl}&videoOnly=1`,
       })
 
       expect(videoOnlyManifest.statusCode).toBe(200)
-      expect(videoOnlyManifest.body).toContain('segment-000001.ts?videoOnly=1')
+      expect(videoOnlyManifest.body).toContain('segment-000001.ts?generation=0&videoOnly=1')
+
+      const beforeMissing = sessionManager.getSession(started.json().id)?.lastAccessedAt
+      const missing = await app.inject({ method: 'GET', url: `/streams/${started.json().id}/segment-999999.ts?generation=0` })
+      expect(missing.statusCode).toBe(404)
+      expect(sessionManager.getSession(started.json().id)?.lastAccessedAt).toBe(beforeMissing)
+      const wrongGeneration = await app.inject({ method: 'GET', url: `/streams/${started.json().id}/segment-000001.ts?generation=999` })
+      expect(wrongGeneration.statusCode).toBe(404)
+      const segmentUri = videoOnlyManifest.body.split('\n').find(line => line.startsWith('segment-'))
+      const segment = await app.inject({ method: 'GET', url: `/streams/${started.json().id}/${segmentUri}` })
+      expect(segment.statusCode).toBe(200)
+      expect(segment.headers['content-type']).toContain('video/mp2t')
+      expect(segment.rawPayload.length).toBeGreaterThan(0)
 
       const player = await app.inject({
         method: 'GET',
@@ -169,7 +181,7 @@ describe('app API', () => {
 
       expect(player.statusCode).toBe(200)
       expect(player.body).toContain('/streams/')
-      expect(player.body).toContain('index.m3u8?videoOnly=1')
+      expect(player.body).toContain('index.m3u8?region=0&amp;videoOnly=1')
 
       const stopped = await app.inject({
         method: 'DELETE',
@@ -288,8 +300,12 @@ describe('app API', () => {
           getSession() {
             return session
           },
-          getStitchedManifest() {
-            return '#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nsegment-000001.ts\n'
+          async readStreamAsset(_sessionId, name, options) {
+            if (name !== 'stitched.m3u8') return null
+            return {
+              kind: 'playlist',
+              content: `#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2,\nsegment-000001.ts${options?.videoOnly ? '?videoOnly=1' : ''}\n`,
+            }
           },
           seek,
         }),

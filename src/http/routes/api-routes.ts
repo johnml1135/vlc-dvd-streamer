@@ -195,6 +195,31 @@ export async function registerApiRoutes(app: FastifyInstance, context: AppContex
     return result
   })
 
+  app.post<{ Params: SessionParams; Body: unknown }>('/api/sessions/:sessionId/playback', async (request, reply) => {
+    const sessionManager = context.services.sessionManager
+    if (!sessionManager) {
+      return sendApiError(reply, 503, 'Session manager is not configured.')
+    }
+
+    const { sessionId } = request.params
+    if (!isValidSessionId(sessionId)) {
+      return sendApiError(reply, 400, 'Invalid session id.')
+    }
+
+    if (!sessionManager.getSession(sessionId)) {
+      return sendApiError(reply, 404, 'Session not found.')
+    }
+
+    const result = await sessionManager.reportPlayback(sessionId, request.body)
+    if (result === 'accepted') return reply.code(204).send()
+    const statusCodeByReason = {
+      stale: 409,
+      invalid: 400,
+      'not-found': 404,
+    } satisfies Record<Exclude<typeof result, 'accepted'>, number>
+    return sendApiError(reply, statusCodeByReason[result], `Playback feedback ${result}.`)
+  })
+
   app.delete<{ Params: SessionParams }>('/api/sessions/:sessionId', async (request, reply) => {
     const sessionManager = context.services.sessionManager
     if (!sessionManager) {

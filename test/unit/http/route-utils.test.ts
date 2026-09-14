@@ -1,5 +1,6 @@
+import { rewriteManifest, rewriteSessionManifest } from '../../../src/media/hls-manifest.js'
 import { describe, expect, it } from 'vitest'
-import { appendStreamFlag, isValidAssetName, isValidSessionId, parseBooleanQuery, rewriteManifest, rewriteSessionManifest } from '../../../src/http/route-utils.js'
+import { appendStreamFlag, isValidAssetName, isValidSessionId, parseBooleanQuery } from '../../../src/http/route-utils.js'
 
 describe('http route helpers', () => {
   it('rewrites only media lines in HLS manifests', () => {

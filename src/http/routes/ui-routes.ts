@@ -1,6 +1,8 @@
-import { createRequire } from 'node:module'
+import { createRequire, stripTypeScriptTypes } from 'node:module'
 import { readFile } from 'node:fs/promises'
-import type { FastifyInstance } from 'fastify'
+import { extname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import type { FastifyInstance, FastifyReply } from 'fastify'
 import type { CatalogSnapshot, DiscTitle } from '../../disc/types.js'
 import type { AppContext } from '../app-types.js'
 import { getHealthSnapshot } from '../health.js'
@@ -23,6 +25,8 @@ interface PlayerQuery {
 interface StopSessionParams {
   sessionId: string
 }
+
+const browserAssetExtension = extname(fileURLToPath(import.meta.url)) === '.ts' ? '.ts' : '.js'
 
 export async function registerUiRoutes(app: FastifyInstance, context: AppContext): Promise<void> {
   app.get<{ Querystring: HomeQuery }>('/', async (request, reply) => {
@@ -80,6 +84,18 @@ export async function registerUiRoutes(app: FastifyInstance, context: AppContext
       session,
       manifestUrl: appendStreamFlag(session.manifestUrl, 'videoOnly', videoOnly),
     }))
+  })
+
+  app.get('/assets/browser-events.js', async (_request, reply) => {
+    await sendBrowserAsset(reply, 'browser-events')
+  })
+
+  app.get('/assets/browser-playback.js', async (_request, reply) => {
+    await sendBrowserAsset(reply, 'browser-playback')
+  })
+
+  app.get('/shared/format-clock.js', async (_request, reply) => {
+    await sendBrowserAsset(reply, 'format-clock')
   })
 
   app.get('/assets/hls.mjs', async (_request, reply) => {
@@ -147,4 +163,18 @@ export async function registerUiRoutes(app: FastifyInstance, context: AppContext
     context.eventHub.publish({ type: 'session.updated', payload: { sessionId, stopped } })
     reply.redirect('/')
   })
+}
+
+async function sendBrowserAsset(reply: FastifyReply, assetName: 'browser-events' | 'browser-playback' | 'format-clock'): Promise<void> {
+  try {
+    const directory = assetName === 'format-clock' ? 'shared' : 'ui'
+    const assetUrl = new URL(`../../${directory}/${assetName}${browserAssetExtension}`, import.meta.url)
+    const source = await readFile(assetUrl, 'utf8')
+    const contents = browserAssetExtension === '.ts'
+      ? stripTypeScriptTypes(source, { mode: 'strip' })
+      : source
+    reply.type('text/javascript').send(contents)
+  } catch {
+    reply.code(404).type('text/plain').send('Browser asset is not available.')
+  }
 }

@@ -49,17 +49,16 @@ export function createSessionManagerStub(overrides: Partial<SessionManagerLike> 
     getActiveSession() {
       return undefined
     },
-    getRegionManifest() {
+    async readStreamAsset() {
       return null
     },
-    getStitchedManifest() {
-      return null
+    async reportPlayback() {
+      return 'not-found'
     },
     async seek() {
       return { ok: false, reason: 'not-found', message: 'Session not found.' }
     },
     touch() {},
-    noteClientSegmentRequest() {},
     async stop() {
       return false
     },

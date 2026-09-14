@@ -30,6 +30,8 @@ export async function installSyntheticHls(page: Page, options: SyntheticHlsOptio
 function buildSyntheticHlsModule(profile: 'healthy'): string {
   return `
 const players = new WeakMap()
+const syntheticHlsState = { instances: [] }
+globalThis.__syntheticHlsState = syntheticHlsState
 
 function createRanges(start, end) {
   return {
@@ -204,8 +206,15 @@ function installHarness(video, source) {
 }
 
 export default class SyntheticHls {
-  static Events = { ERROR: 'hlsError' }
+  static Events = { ERROR: 'hlsError', MANIFEST_PARSED: 'manifestParsed' }
   static ErrorTypes = { MEDIA_ERROR: 'mediaError', NETWORK_ERROR: 'networkError' }
+
+  constructor() {
+    this.listeners = new Map()
+    this.loadedSources = []
+    this.startPositions = []
+    syntheticHlsState.instances.push(this)
+  }
 
   static isSupported() {
     return ${profile === 'healthy' ? 'true' : 'false'}
@@ -213,24 +222,47 @@ export default class SyntheticHls {
 
   loadSource(source) {
     this.source = source
+    this.loadedSources.push(source)
+    if (this.video) {
+      queueMicrotask(() => this.emit(SyntheticHls.Events.MANIFEST_PARSED, {}))
+    }
   }
 
   attachMedia(video) {
     this.video = video
     this.harness = installHarness(video, this.source || video.dataset.manifestUrl || '')
+    queueMicrotask(() => this.emit(SyntheticHls.Events.MANIFEST_PARSED, {}))
   }
 
   destroy() {
+    this.destroyed = true
+    this.listeners.clear()
     this.harness?.destroy()
+    sessionStorage.setItem('synthetic-hls-destroyed', '1')
   }
 
   recoverMediaError() {}
 
-  startLoad() {}
+  startLoad(position) {
+    this.startPositions.push(position)
+  }
 
-  on() {}
+  on(event, listener) {
+    const eventListeners = this.listeners.get(event) || []
+    eventListeners.push(listener)
+    this.listeners.set(event, eventListeners)
+  }
 
-  off() {}
+  off(event, listener) {
+    const eventListeners = this.listeners.get(event) || []
+    this.listeners.set(event, eventListeners.filter((candidate) => candidate !== listener))
+  }
+
+  emit(event, data) {
+    for (const listener of this.listeners.get(event) || []) {
+      listener(event, data)
+    }
+  }
 }
 `
 }
