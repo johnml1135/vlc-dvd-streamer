@@ -27,3 +27,7 @@ Personal playback of one DVD title for one viewer.
 **Playback feedback**: A viewer report of title position, contiguous buffered content, playback rate and paused state, belonging to one Playback region.
 
 **Recovery episode**: The ordered work of checking a suspected stall, collecting final content from a stopped producer, and deciding whether to retry a Slot or fill it.
+
+**Mutation intent**: The current start, seek, or stop request that is allowed to change a Playback session. A newer intent cancels any uncommitted work owned by an older one.
+
+**Region manifest**: The immutable-identity HLS view for one Playback region. Its query-qualified URL is also the identity used to reject stale browser feedback and download evidence.

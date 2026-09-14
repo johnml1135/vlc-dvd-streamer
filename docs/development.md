@@ -62,6 +62,8 @@ Useful environment knobs include:
 
 ## Architecture Pointers
 
+Read [architecture.md](architecture.md) first for the ownership model, recovery sequence, browser feedback contract, and HLS publication guarantees. The source entry points are:
+
 - App factory: [../src/app.ts](../src/app.ts)
 - Production wiring: [../src/server.ts](../src/server.ts)
 - Session selection, reuse and inactivity: [../src/session/session-manager.ts](../src/session/session-manager.ts)
@@ -84,6 +86,19 @@ Publication uses private output directories for each VLC run and publishes compl
 Recovery treats an elapsed deadline as a reason to inspect output. Before replacing a missing segment, the session closes the worker and checks its final output. Recovery decisions are cancelled by newer seek or stop intent. The [recovery design](superpowers/specs/2026-09-14-recovery-design.md) and [timing research](research/2026-09-14-recovery-timing.md) explain these ordering guarantees.
 
 `SessionManagerOptions.time` supplies elapsed time and scheduling together. Tests use the manual adapter in `test/helpers/manual-playback-time.ts` to advance recovery deadlines while retaining real filesystem operations. `SessionManagerOptions.now` supplies calendar timestamps and activity times; changing it does not advance recovery. Browser feedback is qualified by the current region and expires after five seconds; current-region segment downloads provide a fallback when feedback is unavailable.
+
+### Recovery Diagnostics
+
+Recovery messages in the server log record decisions and failures:
+
+- A read retry remains anchored to the same title-time slot.
+- A bad-sector message means the worker closed, final output was collected, and one missing slot was committed as a placeholder.
+- A restart-failure message includes the current failure count and captured error.
+- An exhausted message means repeated VLC restarts exceeded `SESSION_RECOVERY_MAX_ATTEMPTS` and the session stopped.
+
+The bounded period in which a healthy runway lets a quiet VLC worker recover by itself is currently silent. A gap between the last progress event and a later retry or resumed publication can therefore be expected behavior rather than a missing monitor tick.
+
+When investigating a timing failure, preserve the `session`-scope log from `.cache\logs\server.log` or the installed runtime log directory. The current session response from `GET /api/sessions/:sessionId` supplies the region manifest URL, title range, and recovery epoch. The browser developer tools Network panel shows whether `/playback` feedback reported a playing or paused viewer. Capture these with the session id and failure time to distinguish a damaged-disc decision from an obsolete seek, stale browser report, or VLC restart failure.
 
 ## Planning And Specs
 

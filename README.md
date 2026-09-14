@@ -169,5 +169,6 @@ If another machine cannot connect:
 
 ## More Docs 📚
 
+- Playback ownership, recovery flow, browser feedback, and HLS guarantees: [docs/architecture.md](docs/architecture.md)
 - Developer setup, fake VLC, tests, and planning links: [docs/development.md](docs/development.md)
 - License: [LICENSE](LICENSE)
