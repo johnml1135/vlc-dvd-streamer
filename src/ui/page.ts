@@ -17,11 +17,14 @@ interface HomePageInput {
   titles: DiscTitle[]
   includeShort: boolean
   activeSession?: PlaybackSession
+  notice?: string
 }
 
 interface PlayerPageInput {
   session: PlaybackSession
   manifestUrl?: string
+  viewerToken: string
+  viewerActive: boolean
 }
 
 export function renderHomePage(input: HomePageInput): string {
@@ -37,7 +40,7 @@ export function renderHomePage(input: HomePageInput): string {
     status: input.health.dependencies.vlc.found
       ? `VLC ready at ${input.health.dependencies.vlc.path}`
       : 'VLC not found',
-    content,
+    content: `${input.notice ? `<p class="session-notice" role="status">${escapeHtml(input.notice)}</p>` : ''}${content}`,
   })
 }
 
@@ -61,23 +64,29 @@ export function renderPlayerPage(input: PlayerPageInput): string {
           <p class="meta-label">Manifest URL</p>
           <a class="manifest-link" href="${escapeHtml(manifestUrl)}">${escapeHtml(manifestUrl)}</a>
         </div>
-        <video id="player" controls playsinline muted data-manifest-url="${escapeHtml(manifestUrl)}" data-session-manifest-url="${escapeHtml(session.manifestUrl)}" data-session-id="${escapeHtml(session.id)}" data-duration-seconds="${durationSeconds}" data-epoch-start-seconds="${currentRange.startSeconds}" data-recovery-epoch="${recoveryEpoch}"></video>
-        <p id="player-status" class="player-status" role="status">Attaching HLS stream...</p>
-        <button id="retry-playback" type="button" hidden>Retry playback</button>
-        <div class="title-timeline" data-stitched-manifest-url="${escapeHtml(stitchedManifestUrl)}">
-          <div class="title-timeline-row">
-            <label for="title-seek">Title position</label>
-            <span><span id="title-current-time">${escapeHtml(formatClock(currentRange.startSeconds))}</span> / <span id="title-duration">${escapeHtml(formatClock(durationSeconds))}</span></span>
-          </div>
-          <input id="title-seek" type="range" min="0" max="${Math.max(0, Math.floor(durationSeconds))}" step="1" value="${Math.max(0, Math.floor(currentRange.startSeconds))}" ${durationSeconds > 0 ? '' : 'disabled'} />
-          <div class="title-timeline-row title-timeline-foot">
-            <span id="title-buffered-summary">Cached through ${escapeHtml(formatClock(currentRange.endSeconds))}</span>
-            <a class="manifest-link" href="${escapeHtml(stitchedManifestUrl)}">Stitched cache</a>
+        <div id="player-content" ${input.viewerActive ? '' : 'hidden'}>
+          <video id="player" controls playsinline muted data-manifest-url="${escapeHtml(manifestUrl)}" data-session-manifest-url="${escapeHtml(session.manifestUrl)}" data-session-id="${escapeHtml(session.id)}" data-viewer-token="${escapeHtml(input.viewerToken)}" data-viewer-active="${input.viewerActive}" data-duration-seconds="${durationSeconds}" data-epoch-start-seconds="${currentRange.startSeconds}" data-recovery-epoch="${recoveryEpoch}"></video>
+          <p id="player-status" class="player-status" role="status">Attaching HLS stream...</p>
+          <button id="retry-playback" type="button" hidden>Retry playback</button>
+          <div class="title-timeline" data-stitched-manifest-url="${escapeHtml(stitchedManifestUrl)}">
+            <div class="title-timeline-row">
+              <label for="title-seek">Title position</label>
+              <span><span id="title-current-time">${escapeHtml(formatClock(currentRange.startSeconds))}</span> / <span id="title-duration">${escapeHtml(formatClock(durationSeconds))}</span></span>
+            </div>
+            <input id="title-seek" type="range" min="0" max="${Math.max(0, Math.floor(durationSeconds))}" step="1" value="${Math.max(0, Math.floor(currentRange.startSeconds))}" ${durationSeconds > 0 ? '' : 'disabled'} />
+            <div class="title-timeline-row title-timeline-foot">
+              <span id="title-buffered-summary">Cached through ${escapeHtml(formatClock(currentRange.endSeconds))}</span>
+              <a class="manifest-link" href="${escapeHtml(stitchedManifestUrl)}">Stitched cache</a>
+            </div>
           </div>
         </div>
+        <section id="viewer-passive" ${input.viewerActive ? 'hidden' : ''} aria-live="polite">
+          <p id="viewer-status" role="status">${input.viewerActive ? '' : 'Playing on another device'}</p>
+          <button id="take-over-viewer" type="button">Take over?</button>
+        </section>
         <div class="player-actions">
           <a class="ghost-link" href="/">Back to titles</a>
-          <form method="post" action="/actions/sessions/${escapeHtml(session.id)}/stop">
+          <form id="stop-stream-form" method="post" action="/actions/sessions/${escapeHtml(session.id)}/stop" ${input.viewerActive ? '' : 'hidden'}>
             <button type="submit">Stop Stream</button>
           </form>
         </div>
@@ -354,6 +363,7 @@ function renderLayout(input: {
       .toolbar,
       .active-banner,
       .waiting-card,
+      .session-notice,
       .player-shell,
       .log-drawer {
         margin-top: 24px;
@@ -517,7 +527,7 @@ function renderLayout(input: {
 
       @media (max-width: 720px) {
         main { width: min(100vw - 20px, 1120px); padding-top: 20px; }
-        .hero, .toolbar, .active-banner, .waiting-card, .player-shell, .log-drawer { padding: 18px; border-radius: 20px; }
+        .hero, .toolbar, .active-banner, .waiting-card, .session-notice, .player-shell, .log-drawer { padding: 18px; border-radius: 20px; }
       }
     </style>
   </head>

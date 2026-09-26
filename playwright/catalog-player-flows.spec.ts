@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test } from './helpers/test.js'
 import { openReadyCatalog } from './helpers/catalog.js'
 import { installSyntheticHls } from './helpers/synthetic-hls.js'
 
@@ -95,6 +95,38 @@ test('selected audio and subtitles carry into the session and a new title replac
   const previousSession = await previousSessionResponse.json()
 
   expect(previousSession.state).toBe('stopped')
+})
+
+test('a second player page stays passive until it takes over the Active viewer', async ({ page, context }) => {
+  await installSyntheticHls(page)
+  await openReadyCatalog(page)
+  await page.getByRole('button', { name: 'Start Stream' }).first().click()
+  await expect(page).toHaveURL(/\/player\//)
+  await expect(page.locator('#player-content')).toBeVisible()
+  await expect(page.locator('#player-status')).toHaveText('Using hls.js fallback.')
+  await page.locator('#player').evaluate((node) => (node as HTMLVideoElement).play())
+
+  const secondPage = await context.newPage()
+  await installSyntheticHls(secondPage)
+  const passiveRequests: string[] = []
+  secondPage.on('request', (request) => {
+    if (request.url().includes('/streams/') || request.url().endsWith('/playback')) passiveRequests.push(request.url())
+  })
+  await secondPage.goto(page.url())
+  await expect(secondPage.locator('#viewer-status')).toHaveText('Playing on another device')
+  await expect(secondPage.getByRole('button', { name: 'Take over?' })).toBeVisible()
+  await expect(secondPage.locator('#player-content')).toBeHidden()
+  await secondPage.waitForTimeout(2500)
+  expect(passiveRequests).toEqual([])
+
+  await secondPage.getByRole('button', { name: 'Take over?' }).click()
+  await expect(secondPage.locator('#player-content')).toBeVisible()
+  await expect(secondPage.locator('#player-status')).toHaveText('Using hls.js fallback.')
+  await page.bringToFront()
+  await expect(page.locator('#viewer-status')).toHaveText('Watching elsewhere')
+  await expect(page.getByRole('button', { name: 'Take back' })).toBeVisible()
+  await expect.poll(async () => page.locator('#player').evaluate((node) => (node as HTMLVideoElement).paused)).toBe(true)
+  await secondPage.close()
 })
 
 function getSessionId(url: string): string {

@@ -55,7 +55,16 @@ export function createSessionManagerStub(overrides: Partial<SessionManagerLike> 
     async reportPlayback() {
       return 'not-found'
     },
-    async seek() {
+    attachViewer() {
+      return { ok: false, reason: 'not-found' }
+    },
+      takeOverViewer() {
+        return { ok: false, reason: 'not-found' }
+      },
+      releaseViewer() {
+        return false
+      },
+      async seek() {
       return { ok: false, reason: 'not-found', message: 'Session not found.' }
     },
     touch() {},

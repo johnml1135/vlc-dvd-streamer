@@ -1,5 +1,5 @@
 import { formatClock } from '../src/shared/format-clock.js'
-import { expect, test, type Route, type WebSocketRoute } from '@playwright/test'
+import { expect, test, type Route, type WebSocketRoute } from './helpers/test.js'
 import { openReadyCatalog } from './helpers/catalog.js'
 import { installSyntheticHls } from './helpers/synthetic-hls.js'
 

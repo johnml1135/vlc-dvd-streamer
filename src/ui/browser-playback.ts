@@ -50,6 +50,11 @@ export function initializeBrowserPlayback(root: Document = document): () => void
   const videoElement = root.getElementById('player') as HTMLVideoElement | null
   const statusElement = root.getElementById('player-status')
   const retryButton = root.getElementById('retry-playback') as HTMLButtonElement | null
+  const playerContent = root.getElementById('player-content') as HTMLElement | null
+  const viewerPassive = root.getElementById('viewer-passive') as HTMLElement | null
+  const viewerStatus = root.getElementById('viewer-status')
+  const takeOverViewer = root.getElementById('take-over-viewer') as HTMLButtonElement | null
+  const stopStreamForm = root.getElementById('stop-stream-form') as HTMLElement | null
   const seekControl = root.getElementById('title-seek') as HTMLInputElement | null
   const titleCurrentTime = root.getElementById('title-current-time')
   const bufferedSummary = root.getElementById('title-buffered-summary')
@@ -64,6 +69,13 @@ export function initializeBrowserPlayback(root: Document = document): () => void
   const status = statusElement
   const manifestUrl = initialManifestUrl
   const sessionId = activeSessionId
+  // A reload renders a fresh server token while this tab's previous token may
+  // still own the session, so a tab keeps one identity across reloads.
+  const viewerTokenKey = 'viewer-token:' + sessionId
+  const serverViewerToken = video.dataset.viewerToken || ''
+  const renderedActive = video.dataset.viewerActive === 'true'
+  const viewerToken = renderedActive ? serverViewerToken : (readTabViewerToken(viewerTokenKey) || serverViewerToken)
+  storeTabViewerToken(viewerTokenKey, viewerToken)
 
   const durationSeconds = Number(video.dataset.durationSeconds || '0')
   let epochStartSeconds = Number(video.dataset.epochStartSeconds || '0')
@@ -77,6 +89,11 @@ export function initializeBrowserPlayback(root: Document = document): () => void
   let latestSeekRequest = 0
   let pendingRemoteSeeks = 0
   let disposed = false
+  let viewerActive = renderedActive
+  let hasEverOwned = viewerActive
+  let ownershipRequest = 0
+  let viewerUnavailable = false
+  let viewerHeartbeat: ReturnType<typeof setInterval> | null = null
   let attachmentGeneration = 0
   let retrying = false
   let playbackReportRevision = 0
@@ -118,7 +135,7 @@ export function initializeBrowserPlayback(root: Document = document): () => void
     for (let index = 0; index < video.buffered.length; index += 1) {
       const startSeconds = epochStartSeconds + video.buffered.start(index)
       const endSeconds = epochStartSeconds + video.buffered.end(index)
-      if (titleSeconds >= startSeconds && titleSeconds <= endSeconds) {
+      if (titleSeconds >= startSeconds && titleSeconds < endSeconds) {
         return true
       }
     }
@@ -138,7 +155,7 @@ export function initializeBrowserPlayback(root: Document = document): () => void
   }
 
   function playbackReportSnapshot(): PlaybackReportSnapshot | null {
-    if (disposed || !playbackSourceReady || shouldResetPlaybackToZero || pendingRemoteSeeks > 0) {
+    if (disposed || !viewerActive || !playbackSourceReady || shouldResetPlaybackToZero || pendingRemoteSeeks > 0) {
       return null
     }
 
@@ -175,7 +192,7 @@ export function initializeBrowserPlayback(root: Document = document): () => void
   }
 
   function flushPlaybackReport(): void {
-    if (disposed || playbackReportInFlight || !queuedPlaybackReport) {
+    if (disposed || !viewerActive || playbackReportInFlight || !queuedPlaybackReport) {
       return
     }
 
@@ -212,6 +229,7 @@ export function initializeBrowserPlayback(root: Document = document): () => void
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        viewerToken,
         manifestUrl: activeSessionManifestUrl,
         reporterId: playbackReporterId,
         sequence,
@@ -404,7 +422,7 @@ export function initializeBrowserPlayback(root: Document = document): () => void
   }
 
   async function seekTitleTo(titleSeconds: number): Promise<void> {
-    if (!Number.isFinite(titleSeconds)) {
+    if (!viewerActive || !Number.isFinite(titleSeconds)) {
       return
     }
 
@@ -470,7 +488,7 @@ export function initializeBrowserPlayback(root: Document = document): () => void
   }
 
   async function retryPlayback(): Promise<void> {
-    if (disposed || retrying) return
+    if (disposed || !viewerActive || retrying) return
     retrying = true
     if (retryButton) retryButton.disabled = true
     const requestNumber = ++latestSeekRequest
@@ -601,6 +619,10 @@ export function initializeBrowserPlayback(root: Document = document): () => void
     disposed = true
     latestSeekRequest += 1
     lifecycle.abort()
+    if (viewerHeartbeat !== null) {
+      clearInterval(viewerHeartbeat)
+      viewerHeartbeat = null
+    }
     if (playbackHeartbeat !== null) {
       clearInterval(playbackHeartbeat)
       playbackHeartbeat = null
@@ -623,6 +645,102 @@ export function initializeBrowserPlayback(root: Document = document): () => void
     status.textContent = message
   }
 
+  function updateViewerUi(): void {
+    if (playerContent) playerContent.hidden = !viewerActive
+    if (viewerPassive) viewerPassive.hidden = viewerActive
+    if (stopStreamForm) stopStreamForm.hidden = !viewerActive
+    if (viewerActive) {
+      if (viewerStatus) viewerStatus.textContent = ''
+    } else {
+      if (viewerStatus) viewerStatus.textContent = hasEverOwned ? 'Watching elsewhere' : 'Playing on another device'
+      if (takeOverViewer) takeOverViewer.textContent = hasEverOwned ? 'Take back' : 'Take over?'
+    }
+  }
+
+  function setViewerActive(active: boolean): void {
+    if (disposed) return
+    if (viewerActive === active) {
+      updateViewerUi()
+      return
+    }
+
+    viewerActive = active
+    if (active) {
+      hasEverOwned = true
+      updateViewerUi()
+      void attachStream()
+      return
+    }
+
+    latestSeekRequest += 1
+    attachmentGeneration += 1
+    invalidatePlaybackReports()
+    activeHls?.destroy()
+    activeHls = null
+    hlsManifestReady = false
+    expectedNativeSourceUrl = ''
+    nativeHlsActive = false
+    video.pause()
+    video.removeAttribute('src')
+    video.load()
+    if (retryButton) retryButton.hidden = true
+    updateViewerUi()
+  }
+
+  async function refreshViewerOwnership(): Promise<void> {
+    const requestNumber = ++ownershipRequest
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}/viewer/attach`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ viewerToken }),
+        signal: lifecycle.signal,
+      })
+      if (disposed || requestNumber !== ownershipRequest) return
+      if (!response.ok) {
+        viewerUnavailable = true
+        if (viewerHeartbeat !== null) {
+          clearInterval(viewerHeartbeat)
+          viewerHeartbeat = null
+        }
+        setViewerActive(false)
+        if (viewerStatus) viewerStatus.textContent = 'This Playback session has ended.'
+        if (takeOverViewer) takeOverViewer.disabled = true
+        return
+      }
+
+      const result: unknown = await response.json()
+      if (disposed || requestNumber !== ownershipRequest) return
+      if (isViewerOwnershipResult(result)) setViewerActive(result.active)
+    } catch {
+      // Ownership refresh is best effort while the event stream is reconnecting.
+    }
+  }
+
+  async function takeOverPlayback(): Promise<void> {
+    if (disposed || viewerActive) return
+    if (takeOverViewer) takeOverViewer.disabled = true
+    try {
+      const response = await fetch(`/api/sessions/${sessionId}/viewer/takeover`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ viewerToken }),
+        signal: lifecycle.signal,
+      })
+      if (disposed) return
+      if (!response.ok) {
+        if (viewerStatus) viewerStatus.textContent = 'Could not take over this Playback session.'
+        return
+      }
+      const result: unknown = await response.json()
+      if (isViewerOwnershipResult(result)) setViewerActive(result.active)
+    } catch {
+      if (!disposed && viewerStatus) viewerStatus.textContent = 'Could not take over this Playback session.'
+    } finally {
+      if (!disposed && takeOverViewer) takeOverViewer.disabled = false
+    }
+  }
+
   function handleAppEvent(event: BrowserAppEvent): void {
     if (event.type === 'session.updated') {
       const terminalMessage = getTerminalSessionMessage(event.payload, sessionId)
@@ -630,6 +748,11 @@ export function initializeBrowserPlayback(root: Document = document): () => void
       return
     }
 
+    if (event.type === 'session.viewer' && isViewerEventPayload(event.payload, sessionId)) {
+      if (viewerActive) setViewerActive(false)
+      void refreshViewerOwnership()
+      return
+    }
     if (event.type !== 'session.recovery' || !isRecoveryEventPayload(event.payload)) {
       return
     }
@@ -643,6 +766,11 @@ export function initializeBrowserPlayback(root: Document = document): () => void
   }
 
   const unsubscribe = subscribeAppEvents(handleAppEvent)
+  updateViewerUi()
+  root.addEventListener('visibilitychange', () => {
+    if (root.visibilityState === 'visible' && !viewerUnavailable) void refreshViewerOwnership()
+  }, { signal: lifecycle.signal })
+  takeOverViewer?.addEventListener('click', () => { void takeOverPlayback() }, { signal: lifecycle.signal })
   retryButton?.addEventListener('click', () => { void retryPlayback() }, { signal: lifecycle.signal })
   video.addEventListener('error', () => {
     showPlaybackError(video.error?.message || 'Media error ' + (video.error?.code ?? 'unknown'))
@@ -672,8 +800,12 @@ export function initializeBrowserPlayback(root: Document = document): () => void
   seekControl?.addEventListener('change', () => {
     void seekTitleTo(Number(seekControl.value))
   }, { signal: lifecycle.signal })
-  void attachStream()
+  if (!viewerActive) void refreshViewerOwnership()
+  if (viewerActive) void attachStream()
   playbackHeartbeat = setInterval(queuePlaybackReport, 2000)
+  viewerHeartbeat = setInterval(() => {
+    if (!viewerUnavailable) void refreshViewerOwnership()
+  }, 2000)
 
   const dispose = (): void => {
     if (disposed) {
@@ -687,6 +819,7 @@ export function initializeBrowserPlayback(root: Document = document): () => void
       clearInterval(playbackHeartbeat)
       playbackHeartbeat = null
     }
+    if (viewerHeartbeat !== null) clearInterval(viewerHeartbeat)
     queuedPlaybackReport = null
     clearPlaybackReportTimer()
     if (playbackReportTimeout !== null) {
@@ -704,6 +837,12 @@ export function initializeBrowserPlayback(root: Document = document): () => void
     }
   }
   window.addEventListener('pagehide', (event) => {
+    void fetch(`/api/sessions/${sessionId}/viewer/release`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ viewerToken }),
+      keepalive: true,
+    }).catch(() => {})
     if (event.persisted) {
       try {
         sessionStorage.setItem(resumeKey, JSON.stringify({ manifestUrl: activeSessionManifestUrl, startSeconds: epochStartSeconds, mediaTime: video.currentTime }))
@@ -714,6 +853,31 @@ export function initializeBrowserPlayback(root: Document = document): () => void
     dispose()
   }, { once: true, signal: lifecycle.signal })
   return dispose
+}
+
+function isViewerOwnershipResult(value: unknown): value is { active: boolean } {
+  return Boolean(value && typeof value === 'object' && 'active' in value && typeof value.active === 'boolean')
+}
+
+function readTabViewerToken(key: string): string | null {
+  try {
+    return sessionStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function storeTabViewerToken(key: string, token: string): void {
+  if (!token) return
+  try {
+    sessionStorage.setItem(key, token)
+  } catch {
+    // Without storage a reload waits for the stale owner to expire.
+  }
+}
+
+function isViewerEventPayload(value: unknown, sessionId: string): value is { sessionId: string } {
+  return Boolean(value && typeof value === 'object' && 'sessionId' in value && value.sessionId === sessionId)
 }
 
 function appendStreamFlag(url: string, key: string): string {
