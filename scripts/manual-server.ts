@@ -10,6 +10,7 @@ import {
   getManualServerPaths,
   type ManualServerState,
 } from '../src/runtime/manual-server-control.js'
+import { matchesManualServerProcess, readWindowsProcessIdentity } from '../src/runtime/process-identity.js'
 
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(scriptDir, '..')
@@ -65,10 +66,11 @@ async function readManualServerState(): Promise<ManualServerState | null> {
   }
 }
 
-async function writeManualServerState(pid: number, command: string, args: string[]): Promise<ManualServerState> {
+async function writeManualServerState(pid: number, command: string, args: string[], processStartTime: string): Promise<ManualServerState> {
   const state = createManualServerState({
     repoRoot,
     pid,
+    processStartTime,
     host: process.env.HOST,
     port: process.env.PORT,
     dvdDrive: process.env.DVD_DRIVE,
@@ -84,15 +86,21 @@ async function writeManualServerState(pid: number, command: string, args: string
 
 async function startManualServer(): Promise<void> {
   const existingState = await readManualServerState()
-  if (existingState && isProcessRunning(existingState.pid)) {
-    console.log('VLC DVD Streamer is already running in the background.')
-    console.log(`PID: ${existingState.pid}`)
-    console.log(`URL: ${formatManualServerUrl(existingState.host, existingState.port)}`)
-    console.log(`State file: ${paths.stateFilePath}`)
-    return
-  }
-
   if (existingState) {
+    if (isProcessRunning(existingState.pid)) {
+      const liveIdentity = readWindowsProcessIdentity(existingState.pid)
+      if (!liveIdentity) {
+        throw new Error(`Could not verify PID ${existingState.pid}; leaving the existing server state untouched.`)
+      }
+      if (matchesManualServerProcess(existingState, liveIdentity)) {
+        console.log('VLC DVD Streamer is already running in the background.')
+        console.log(`PID: ${existingState.pid}`)
+        console.log(`URL: ${formatManualServerUrl(existingState.host, existingState.port)}`)
+        console.log(`State file: ${paths.stateFilePath}`)
+        return
+      }
+    }
+
     await rm(paths.stateFilePath, { force: true })
   }
 
@@ -117,7 +125,12 @@ async function startManualServer(): Promise<void> {
 
     child.unref()
 
-    const state = await writeManualServerState(child.pid, command, args)
+    const identity = readWindowsProcessIdentity(child.pid)
+    if (!identity) {
+      child.kill()
+      throw new Error(`Could not verify the newly started server process (PID ${child.pid}).`)
+    }
+    const state = await writeManualServerState(child.pid, command, args, identity.processStartTime)
     const running = await waitFor(() => isProcessRunning(child.pid ?? 0), 1500, 100)
     if (!running) {
       await rm(paths.stateFilePath, { force: true })
@@ -175,6 +188,22 @@ async function stopManualServer(): Promise<void> {
   const state = await readManualServerState()
   if (!state) {
     console.log('No manual server state file found.')
+    return
+  }
+
+  if (!isProcessRunning(state.pid)) {
+    await rm(paths.stateFilePath, { force: true })
+    console.log(`PID ${state.pid} is no longer running; removed the stale state file.`)
+    return
+  }
+
+  const liveIdentity = readWindowsProcessIdentity(state.pid)
+  if (!liveIdentity) {
+    throw new Error(`Could not verify PID ${state.pid}; the process was left running and the state file was kept.`)
+  }
+  if (!matchesManualServerProcess(state, liveIdentity)) {
+    await rm(paths.stateFilePath, { force: true })
+    console.log(`PID ${state.pid} belongs to another process; it was not stopped. Removed the stale state file.`)
     return
   }
 

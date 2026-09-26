@@ -1,7 +1,7 @@
-import { mkdtemp } from 'node:fs/promises'
+import { access, mkdtemp, readFile, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { CatalogService } from '../../src/disc/catalog-service.js'
 import type { CatalogSnapshot, RawDiscScan } from '../../src/disc/types.js'
 
@@ -102,5 +102,45 @@ describe('CatalogService', () => {
         currentTitleNumber: 2,
       },
     }))
+  })
+  it('reuses a saved catalog by disc identity and forces a rescan on request', async () => {
+    const cacheDir = await mkdtemp(join(tmpdir(), 'vlc-dvd-streamer-catalog-cache-'))
+    const identity = 'disc-known-identity'
+    const scanDisc = vi.fn(async ({ drive }: { drive?: string }) => ({
+      discId: identity,
+      drive: drive ?? 'D:',
+      titles: [{
+        titleNumber: 1,
+        durationSeconds: scanDisc.mock.calls.length === 1 ? 600 : 720,
+        audioTracks: [],
+        subtitleTracks: [],
+      }],
+    }))
+    const worker = {
+      identifyDisc: vi.fn(async () => identity),
+      scanDisc,
+    }
+    const createService = (drive: string) => new CatalogService({
+      cacheDir,
+      drive,
+      minVisibleTitleDurationSeconds: 300,
+      worker: worker as never,
+    })
+
+    const first = await createService('D:').refresh()
+    const thumbnailPath = join(cacheDir, 'discs', identity, 'title-1', 'thumbnail.jpg')
+    await mkdir(join(cacheDir, 'discs', identity, 'title-1'), { recursive: true })
+    await writeFile(thumbnailPath, 'saved thumbnail')
+
+    const reinserted = await createService('E:').refresh()
+    expect(scanDisc).toHaveBeenCalledTimes(1)
+    expect(reinserted.disc?.drive).toBe('E:')
+    expect(reinserted.disc?.titles).toEqual(first.disc?.titles)
+    await expect(readFile(thumbnailPath, 'utf8')).resolves.toBe('saved thumbnail')
+
+    const refreshed = await createService('E:').refresh({ force: true })
+    expect(scanDisc).toHaveBeenCalledTimes(2)
+    expect(refreshed.disc?.titles[0]?.durationSeconds).toBe(720)
+    await expect(access(thumbnailPath)).resolves.toBeUndefined()
   })
 })

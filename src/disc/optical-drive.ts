@@ -41,6 +41,7 @@ export function selectOpticalDrive(drives: OpticalDrive[]): string | null {
 export interface DetectOpticalDriveOptions {
   platform?: NodeJS.Platform
   runPowerShell?: (script: string) => Promise<string>
+  onMultipleLoadedDrives?: (drives: string[]) => void
 }
 
 /**
@@ -56,7 +57,10 @@ export async function detectOpticalDrive(options: DetectOpticalDriveOptions = {}
   const runPowerShell = options.runPowerShell ?? defaultRunPowerShell
   try {
     const output = await runPowerShell(DETECT_SCRIPT)
-    return selectOpticalDrive(parseOpticalDrives(output))
+    const drives = parseOpticalDrives(output)
+    const loadedDrives = drives.filter((drive) => drive.mediaLoaded).map((drive) => drive.drive)
+    if (loadedDrives.length > 1) options.onMultipleLoadedDrives?.(loadedDrives)
+    return selectOpticalDrive(drives)
   } catch {
     return null
   }

@@ -1,11 +1,15 @@
 import { constants } from 'node:fs'
-import { access, mkdir, readFile } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { access, mkdir, readFile, rename, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { FastifyInstance } from 'fastify'
 import type { AppContext } from '../app-types.js'
+import { ThumbnailJobs } from '../thumbnail-jobs.js'
 import { getHealthSnapshot } from '../health.js'
 import { parsePlaybackRequest, startPlaybackSession } from '../playback.js'
 import { isValidSessionId, parseBooleanQuery, sendApiError } from '../route-utils.js'
+
+const thumbnailJobs = new ThumbnailJobs(2)
 
 const PLACEHOLDER_PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4////fwAJ+wP+2mS2WQAAAABJRU5ErkJggg==',
@@ -50,7 +54,7 @@ export async function registerApiRoutes(app: FastifyInstance, context: AppContex
       return sendApiError(reply, 503, 'Catalog service is not configured.')
     }
 
-    const snapshot = await catalogService.refresh()
+    const snapshot = await catalogService.refresh({ force: true })
     context.eventHub.publish({ type: 'disc.updated', payload: snapshot })
     context.eventHub.publish({ type: 'catalog.updated', payload: snapshot })
     return snapshot
@@ -97,23 +101,42 @@ export async function registerApiRoutes(app: FastifyInstance, context: AppContex
       await access(outputPath, constants.F_OK)
     } catch {
       try {
-        await vlcWorker.generateThumbnail({
-          drive: snapshot.disc.drive,
-          titleNumber,
-          outputDir,
-          startTimeSeconds: 45,
-          runTimeSeconds: 2,
+        await thumbnailJobs.run(JSON.stringify([snapshot.disc.discId, titleNumber]), async () => {
+          try {
+            await access(outputPath, constants.F_OK)
+            return
+          } catch {
+            // Another request may have filled this title while this job waited.
+          }
+
+          const temporaryDir = join(context.config.cacheDir, 'thumbnail-jobs', randomUUID())
+          await mkdir(temporaryDir, { recursive: true })
+          try {
+            const result = await vlcWorker.generateThumbnail({
+              drive: snapshot.disc!.drive,
+              titleNumber,
+              outputDir: temporaryDir,
+              startTimeSeconds: 45,
+              runTimeSeconds: 2,
+            })
+            const isCurrentDisc = typeof catalogService.isDiscCurrent === 'function'
+              ? await catalogService.isDiscCurrent(snapshot.disc!.discId)
+              : catalogService.getSnapshot().disc?.discId === snapshot.disc!.discId
+            if (!isCurrentDisc) throw new Error('The disc changed while its thumbnail was being generated.')
+            await rename(result.outputPath, outputPath)
+            context.eventHub.publish({ type: 'thumbnail.updated', payload: { discId: snapshot.disc!.discId, titleNumber } })
+          } finally {
+            await rm(temporaryDir, { recursive: true, force: true })
+          }
         })
-        context.eventHub.publish({ type: 'thumbnail.updated', payload: { discId: snapshot.disc.discId, titleNumber } })
       } catch {
         reply.type('image/png').send(PLACEHOLDER_PNG)
         return
       }
     }
-
     try {
       const file = await readFile(outputPath)
-      reply.type('image/png').send(file)
+      reply.type('image/jpeg').send(file)
     } catch {
       reply.type('image/png').send(PLACEHOLDER_PNG)
     }

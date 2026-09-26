@@ -1,5 +1,7 @@
 import { join } from 'node:path'
 
+export { matchesManualServerProcess } from './process-identity.js'
+
 export interface ManualServerPaths {
   runtimeDir: string
   logsDir: string
@@ -16,6 +18,7 @@ export interface ManualServerCommand {
 export interface ManualServerState {
   pid: number
   startedAt: string
+  processStartTime?: string
   repoRoot: string
   host?: string
   port?: string
@@ -37,6 +40,7 @@ export interface CreateManualServerStateInput {
   stdoutLogPath: string
   stderrLogPath: string
   startedAt?: string
+  processStartTime?: string
 }
 
 export function getManualServerPaths(repoRoot: string): ManualServerPaths {
@@ -63,6 +67,7 @@ export function createManualServerState(input: CreateManualServerStateInput): Ma
   return {
     pid: input.pid,
     startedAt: input.startedAt ?? new Date().toISOString(),
+    ...(input.processStartTime ? { processStartTime: input.processStartTime } : {}),
     repoRoot: input.repoRoot,
     host: input.host,
     port: input.port,

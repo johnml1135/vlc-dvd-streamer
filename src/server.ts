@@ -3,12 +3,13 @@ import { mkdir } from 'node:fs/promises'
 import { buildApp } from './app.js'
 import { loadConfig } from './config.js'
 import { CatalogService } from './disc/catalog-service.js'
-import { resolveDvdSource } from './disc/optical-drive.js'
+import { detectOpticalDrive, resolveDvdSource } from './disc/optical-drive.js'
 import { EventHub } from './events/event-hub.js'
 import { createFileLogSink } from './logging/file-log-sink.js'
 import { ServerLog } from './logging/server-log.js'
 import { SessionManager } from './session/session-manager.js'
 import { findVlc } from './vlc/find-vlc.js'
+import { attachVlcProcessRegistry, VlcProcessRegistry } from './vlc/process-registry.js'
 import { VlcWorker } from './vlc/worker.js'
 
 const config = loadConfig(process.env)
@@ -33,10 +34,23 @@ const serverLog = new ServerLog(eventHub, 200, (line, entry) => {
 })
 serverLog.info('server', `Writing server log to ${fileLogSink.path}.`)
 
+const vlcProcessRegistry = new VlcProcessRegistry(config.cacheDir)
+const orphanedVlcProcesses = await vlcProcessRegistry.sweep()
+if (orphanedVlcProcesses > 0) {
+  serverLog.warn('server', `Stopped ${orphanedVlcProcesses} abandoned VLC process(es) from the previous server run.`)
+}
+const detachVlcProcessRegistry = attachVlcProcessRegistry(vlcProcessRegistry, (error) => {
+  serverLog.warn('server', `Could not update the VLC process registry: ${error instanceof Error ? error.message : String(error)}`)
+})
+
 // Resolve the optical drive: an explicit DVD_DRIVE always wins; otherwise
 // auto-detect the Windows optical drive (preferring one with a disc loaded) so
 // the app does not silently probe the wrong letter.
-const sourceResolution = await resolveDvdSource(process.env.DVD_DRIVE)
+const sourceResolution = await resolveDvdSource(process.env.DVD_DRIVE, () => detectOpticalDrive({
+  onMultipleLoadedDrives: (drives) => {
+    serverLog.warn('server', `Multiple optical drives contain discs (${drives.join(', ')}); using ${drives[0]}. Set DVD_DRIVE to choose another drive.`)
+  },
+}))
 const resolvedDrive = sourceResolution.source
 if (sourceResolution.detected) serverLog.info('server', `Auto-detected optical drive ${resolvedDrive}.`)
 if (!sourceResolution.explicit && !sourceResolution.detected) {
@@ -116,6 +130,7 @@ const app = await buildApp({
 
 app.addHook('onClose', async () => {
   clearInterval(cleanupTimer)
+  detachVlcProcessRegistry()
   await fileLogSink.close()
 })
 

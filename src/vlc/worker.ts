@@ -59,6 +59,10 @@ export class VlcWorker {
     return this.scanner.scanDisc(input)
   }
 
+  identifyDisc(drive = this.options.drive): Promise<string> {
+    return this.scanner.identifyDisc(drive)
+  }
+
   async generateThumbnail(input: {
     drive: string
     titleNumber: number

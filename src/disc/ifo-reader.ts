@@ -48,14 +48,24 @@ interface VtsInfo {
   subtitleTracks: IfoTrack[]
 }
 
+export interface IfoReadResult {
+  titles: IfoTitle[]
+  expectedTitleCount: number
+  skippedTitleNumbers: number[]
+}
+
 export async function readDvdTitlesFromIfo(videoTsDir: string): Promise<IfoTitle[]> {
+  return (await readDvdTitlesFromIfoDetailed(videoTsDir)).titles
+}
+
+export async function readDvdTitlesFromIfoDetailed(videoTsDir: string): Promise<IfoReadResult> {
   const vmgi = await readFile(join(videoTsDir, 'VIDEO_TS.IFO'))
   if (!hasIfoSignature(vmgi, 'DVDVIDEO-VMG')) {
     throw new Error('VIDEO_TS.IFO is not a valid DVD video manager (VMGI) file.')
   }
 
-  const titleEntries = parseTitleSearchPointerTable(vmgi)
-  if (titleEntries.length === 0) {
+  const { entries: titleEntries, expectedTitleCount } = parseTitleSearchPointerTable(vmgi)
+  if (expectedTitleCount === 0) {
     throw new Error('The DVD title table (TT_SRPT) listed no playable titles.')
   }
 
@@ -83,19 +93,22 @@ export async function readDvdTitlesFromIfo(videoTsDir: string): Promise<IfoTitle
     })
   }
 
-  return titles
-}
+  const decodedTitleNumbers = new Set(titles.map((title) => title.titleNumber))
+  const skippedTitleNumbers = Array.from({ length: expectedTitleCount }, (_, index) => index + 1)
+    .filter((titleNumber) => !decodedTitleNumbers.has(titleNumber))
 
-function parseTitleSearchPointerTable(vmgi: Buffer): TitleSearchEntry[] {
+  return { titles, expectedTitleCount, skippedTitleNumbers }
+}
+function parseTitleSearchPointerTable(vmgi: Buffer): { entries: TitleSearchEntry[]; expectedTitleCount: number } {
   const base = vmgi.readUInt32BE(0xc4) * SECTOR_BYTES
   if (base + 8 > vmgi.length) {
     throw new Error('TT_SRPT sector pointer is outside the VMGI file.')
   }
 
-  const titleCount = vmgi.readUInt16BE(base)
+  const expectedTitleCount = vmgi.readUInt16BE(base)
   const entries: TitleSearchEntry[] = []
 
-  for (let index = 0; index < titleCount; index += 1) {
+  for (let index = 0; index < expectedTitleCount; index += 1) {
     const entryStart = base + 8 + index * 12
     if (entryStart + 12 > vmgi.length) {
       break
@@ -110,9 +123,8 @@ function parseTitleSearchPointerTable(vmgi: Buffer): TitleSearchEntry[] {
     })
   }
 
-  return entries
+  return { entries, expectedTitleCount }
 }
-
 async function loadVtsInfo(videoTsDir: string, vtsNumber: number, cache: Map<number, VtsInfo | null>): Promise<VtsInfo | null> {
   if (cache.has(vtsNumber)) {
     return cache.get(vtsNumber) ?? null

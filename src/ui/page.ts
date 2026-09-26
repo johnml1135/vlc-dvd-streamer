@@ -1,5 +1,6 @@
 import { formatClock } from '../shared/format-clock.js'
 import type { CatalogSnapshot, DiscTitle } from '../disc/types.js'
+import { DRIVE_BUSY_MESSAGE, isDriveBusyMessage } from '../disc/drive-errors.js'
 import type { PlaybackSession } from '../session/session-manager.js'
 
 interface HomePageInput {
@@ -86,6 +87,30 @@ export function renderPlayerPage(input: PlayerPageInput): string {
   })
 }
 
+export function renderRetryPage(input: { message: string; action: string; fields?: Record<string, string> }): string {
+  const hiddenFields = Object.entries(input.fields ?? {})
+    .map(([name, value]) => `<input type="hidden" name="${escapeHtml(name)}" value="${escapeHtml(value)}" />`)
+    .join('')
+
+  return renderLayout({
+    title: 'Playback needs a retry',
+    eyebrow: 'Action failed',
+    headline: 'Could not start playback',
+    summary: 'The request is saved on this page so you can retry after resolving the problem.',
+    status: 'Retry available',
+    content: `
+      <section class="waiting-card">
+        <h2>${escapeHtml(input.message)}</h2>
+        <form method="post" action="${escapeHtml(input.action)}">
+          ${hiddenFields}
+          <button type="submit">Retry</button>
+        </form>
+        <a class="ghost-link" href="/">Back to titles</a>
+      </section>
+    `,
+  })
+}
+
 function renderCatalog(input: HomePageInput): string {
   const disc = input.snapshot.disc
   if (!disc) {
@@ -158,6 +183,8 @@ function renderCatalog(input: HomePageInput): string {
 }
 
 function renderWaiting(input: HomePageInput): string {
+  const failureDetail = input.snapshot.error?.detail ?? input.snapshot.error?.message ?? ''
+  const isDriveBusy = input.snapshot.state === 'catalog_error' && isDriveBusyMessage(failureDetail)
   const loadingDetail = (() => {
     const progress = input.snapshot.progress
     if (!progress || progress.totalTitles === null) {
@@ -194,8 +221,8 @@ function renderWaiting(input: HomePageInput): string {
       detail: 'Insert the disc again and refresh to rebuild the catalog.',
     },
     catalog_error: {
-      title: input.snapshot.error?.message ?? 'Catalog generation failed.',
-      detail: input.snapshot.error?.detail ?? 'The VLC worker could not build a title catalog.',
+      title: isDriveBusy ? DRIVE_BUSY_MESSAGE : input.snapshot.error?.message ?? 'Catalog generation failed.',
+      detail: isDriveBusy ? 'Close the program using the optical drive, then retry.' : input.snapshot.error?.detail ?? 'The VLC worker could not build a title catalog.',
     },
   }
 
@@ -207,7 +234,7 @@ function renderWaiting(input: HomePageInput): string {
       <h2>${escapeHtml(state.title)}</h2>
       <p>${escapeHtml(state.detail)}</p>
       <form method="post" action="/actions/refresh">
-        <button type="submit">Refresh Disc</button>
+        <button type="submit">${input.snapshot.state === 'catalog_error' ? 'Retry' : 'Refresh Disc'}</button>
       </form>
     </section>
   `

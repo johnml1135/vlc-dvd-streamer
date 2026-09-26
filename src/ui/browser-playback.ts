@@ -88,6 +88,7 @@ export function initializeBrowserPlayback(root: Document = document): () => void
   let playbackReportController: AbortController | null = null
   let playbackReportTimer: ReturnType<typeof setTimeout> | null = null
   let playbackReportTimeout: ReturnType<typeof setTimeout> | null = null
+  let playbackHeartbeat: ReturnType<typeof setInterval> | null = null
   let expectedNativeSourceUrl = ''
   let hlsManifestReady = false
   const playbackReporterId = createPlaybackReporterId()
@@ -595,7 +596,40 @@ export function initializeBrowserPlayback(root: Document = document): () => void
     showPlaybackError('This browser needs native HLS or hls.js support to render the stream.')
   }
 
+  function stopAfterTerminalSession(message: string): void {
+    if (disposed) return
+    disposed = true
+    latestSeekRequest += 1
+    lifecycle.abort()
+    if (playbackHeartbeat !== null) {
+      clearInterval(playbackHeartbeat)
+      playbackHeartbeat = null
+    }
+    queuedPlaybackReport = null
+    clearPlaybackReportTimer()
+    if (playbackReportTimeout !== null) {
+      clearTimeout(playbackReportTimeout)
+      playbackReportTimeout = null
+    }
+    playbackReportController?.abort()
+    unsubscribe()
+    activeHls?.destroy()
+    activeHls = null
+    video.pause()
+    video.removeAttribute('src')
+    video.load()
+    nativeHlsActive = false
+    if (retryButton) retryButton.hidden = true
+    status.textContent = message
+  }
+
   function handleAppEvent(event: BrowserAppEvent): void {
+    if (event.type === 'session.updated') {
+      const terminalMessage = getTerminalSessionMessage(event.payload, sessionId)
+      if (terminalMessage) stopAfterTerminalSession(terminalMessage)
+      return
+    }
+
     if (event.type !== 'session.recovery' || !isRecoveryEventPayload(event.payload)) {
       return
     }
@@ -639,7 +673,7 @@ export function initializeBrowserPlayback(root: Document = document): () => void
     void seekTitleTo(Number(seekControl.value))
   }, { signal: lifecycle.signal })
   void attachStream()
-  const playbackHeartbeat = setInterval(queuePlaybackReport, 2000)
+  playbackHeartbeat = setInterval(queuePlaybackReport, 2000)
 
   const dispose = (): void => {
     if (disposed) {
@@ -649,7 +683,10 @@ export function initializeBrowserPlayback(root: Document = document): () => void
     disposed = true
     latestSeekRequest += 1
     lifecycle.abort()
-    clearInterval(playbackHeartbeat)
+    if (playbackHeartbeat !== null) {
+      clearInterval(playbackHeartbeat)
+      playbackHeartbeat = null
+    }
     queuedPlaybackReport = null
     clearPlaybackReportTimer()
     if (playbackReportTimeout !== null) {
@@ -746,6 +783,25 @@ function isTimelineSnapshot(value: unknown): value is TimelineSnapshot {
     && 'endSeconds' in range && typeof range.endSeconds === 'number' && Number.isFinite(range.endSeconds) && range.endSeconds >= range.startSeconds)
 }
 
+function getTerminalSessionMessage(value: unknown, sessionId: string): string | null {
+  if (!value || typeof value !== 'object') return null
+  const payload = value as { id?: unknown; sessionId?: unknown; state?: unknown; stopped?: unknown; error?: unknown }
+  if (payload.id !== sessionId && payload.sessionId !== sessionId) return null
+
+  if (payload.state === 'failed') {
+    const error = payload.error && typeof payload.error === 'object'
+      ? (payload.error as { message?: unknown }).message
+      : undefined
+    const reason = typeof error === 'string' && error.length > 0 ? error : 'The stream could not continue.'
+    return 'Playback failed: ' + reason
+  }
+
+  if (payload.state === 'stopped' || payload.stopped === true) {
+    return 'This playback session ended. Return to titles to start another stream.'
+  }
+
+  return null
+}
 function isRecoveryEventPayload(value: unknown): value is RecoveryEventPayload {
   if (!value || typeof value !== 'object') {
     return false

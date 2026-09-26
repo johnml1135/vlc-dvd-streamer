@@ -5,10 +5,11 @@ import { fileURLToPath } from 'node:url'
 import type { FastifyInstance, FastifyReply } from 'fastify'
 import type { CatalogSnapshot, DiscTitle } from '../../disc/types.js'
 import type { AppContext } from '../app-types.js'
+import { DRIVE_BUSY_MESSAGE, isDriveBusyMessage, userFacingDriveError } from '../../disc/drive-errors.js'
 import { getHealthSnapshot } from '../health.js'
 import { parsePlaybackRequest, startPlaybackSession } from '../playback.js'
 import { appendStreamFlag, isValidSessionId, parseBooleanQuery, sendApiError } from '../route-utils.js'
-import { renderHomePage, renderPlayerPage } from '../../ui/page.js'
+import { renderHomePage, renderPlayerPage, renderRetryPage } from '../../ui/page.js'
 
 interface HomeQuery {
   includeShort?: string
@@ -115,7 +116,20 @@ export async function registerUiRoutes(app: FastifyInstance, context: AppContext
       return sendApiError(reply, 503, 'Catalog service is not configured.')
     }
 
-    catalogService.startRefresh()
+    const snapshot = await catalogService.refresh({ force: true })
+    if (snapshot.state === 'catalog_error') {
+      const detail = snapshot.error?.detail ?? snapshot.error?.message ?? 'Could not read DVD titles.'
+      const message = isDriveBusyMessage(detail) ? DRIVE_BUSY_MESSAGE : snapshot.error?.message ?? detail
+      const health = await getHealthSnapshot(context.config)
+      reply.code(503).type('text/html').send(renderHomePage({
+        health,
+        snapshot: { ...snapshot, error: { message, detail } },
+        titles: [],
+        includeShort: false,
+      }))
+      return
+    }
+
     reply.redirect('/')
   })
 
@@ -142,7 +156,19 @@ export async function registerUiRoutes(app: FastifyInstance, context: AppContext
     })
 
     if (!result.ok) {
-      return sendApiError(reply, result.statusCode, result.message, result.detail)
+      const message = userFacingDriveError(result.message, result.detail)
+      const detail = result.detail && message !== DRIVE_BUSY_MESSAGE ? ` ${result.detail}` : ''
+      reply.code(result.statusCode).type('text/html').send(renderRetryPage({
+        message: `${message}${detail}`,
+        action: '/actions/play',
+        fields: {
+          discId: playbackRequest.request.discId,
+          titleNumber: String(playbackRequest.request.titleNumber),
+          audioTrack: playbackRequest.request.audioTrack === null ? '' : String(playbackRequest.request.audioTrack),
+          subtitleTrack: playbackRequest.request.subtitleTrack === null ? '' : String(playbackRequest.request.subtitleTrack),
+        },
+      }))
+      return
     }
 
     reply.redirect(`/player/${result.session.id}`)

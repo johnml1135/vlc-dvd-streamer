@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { readDvdTitlesFromIfo } from '../../../src/disc/ifo-reader.js'
+import { readDvdTitlesFromIfo, readDvdTitlesFromIfoDetailed } from '../../../src/disc/ifo-reader.js'
 
 const SECTOR = 2048
 const TT_SRPT_SECTOR = 1
@@ -338,3 +338,23 @@ function writeSubpAttrs(buffer: Buffer, slots: SubpSlot[]): void {
 function bcd(value: number): number {
   return (Math.floor(value / 10) << 4) | (value % 10)
 }
+
+describe('IFO completeness diagnostics', () => {
+  it('reports title-table entries whose VTS files cannot be read', async () => {
+    const dir = await writeDisc({
+      titles: [
+        { chapters: 1, vts: 1, ttn: 1 },
+        { chapters: 1, vts: 2, ttn: 1 },
+      ],
+      vts: {
+        1: { pttByTitle: [[1]], pgcDurations: [[0, 0, 10]] },
+      },
+    })
+
+    const result = await readDvdTitlesFromIfoDetailed(dir)
+
+    expect(result.expectedTitleCount).toBe(2)
+    expect(result.skippedTitleNumbers).toEqual([2])
+    expect(result.titles.map((title) => title.titleNumber)).toEqual([1])
+  })
+})

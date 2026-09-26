@@ -333,3 +333,17 @@ describe('native browser playback', () => {
     expect(video.src).toBe('')
   })
 })
+
+  it('shows a matching terminal session failure and stops native playback', async () => {
+    const { video, status, dispose } = setup()
+    try {
+      await vi.waitFor(() => expect(video.src).toContain('region=0'))
+      transport.listener?.({
+        type: 'session.updated',
+        payload: { id: 'test', state: 'failed', error: { message: 'Playback stopped after repeated unreadable DVD sectors.' } },
+      })
+      expect(status.textContent).toBe('Playback failed: Playback stopped after repeated unreadable DVD sectors.')
+      expect(video.pause).toHaveBeenCalled()
+      expect(video.src).toBe('')
+    } finally { dispose() }
+  })

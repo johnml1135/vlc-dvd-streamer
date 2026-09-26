@@ -1,12 +1,48 @@
 import { describe, expect, it } from 'vitest'
 import { join } from 'node:path'
+import * as manualControlApi from '../../src/runtime/manual-server-control.js'
 import {
   buildManualServerCommand,
   createManualServerState,
   getManualServerPaths,
 } from '../../src/runtime/manual-server-control.js'
 
+const identityApi = manualControlApi as typeof manualControlApi & {
+  matchesManualServerProcess?: (state: {
+    pid: number
+    processStartTime?: string
+    command: string
+    args: string[]
+    repoRoot: string
+  }, live: { pid: number; processStartTime: string; executablePath: string; commandLine: string } | null) => boolean
+}
+
 describe('manual server control', () => {
+  it('validates PID, creation time, executable, and command before treating a process as the server', () => {
+    const matches = identityApi.matchesManualServerProcess
+    expect(matches).toBeTypeOf('function')
+
+    const state = {
+      pid: 4242,
+      processStartTime: '20260925200000.000000-240',
+      repoRoot: 'C:/repo/vlc-dvd-streamer',
+      command: 'C:/Program Files/nodejs/node.exe',
+      args: ['--import', 'tsx', 'C:/repo/vlc-dvd-streamer/src/server.ts'],
+    }
+    const live = {
+      pid: 4242,
+      processStartTime: state.processStartTime,
+      executablePath: 'c:\\program files\\nodejs\\node.exe',
+      commandLine: '"C:\\Program Files\\nodejs\\node.exe" --import tsx C:\\repo\\vlc-dvd-streamer\\src\\server.ts',
+    }
+
+    expect(matches!(state, live)).toBe(true)
+    expect(matches!(state, { ...live, processStartTime: 'different-start' })).toBe(false)
+    expect(matches!(state, { ...live, executablePath: 'C:\\Windows\\System32\\notepad.exe' })).toBe(false)
+    expect(matches!(state, { ...live, commandLine: 'notepad.exe' })).toBe(false)
+    expect(matches!({ ...state, processStartTime: undefined }, live)).toBe(false)
+  })
+
   it('uses stable runtime paths for PID and logs', () => {
     const repoRoot = 'C:/repo/vlc-dvd-streamer'
     const paths = getManualServerPaths(repoRoot)
@@ -37,6 +73,7 @@ describe('manual server control', () => {
       host: '0.0.0.0',
       port: '3000',
       dvdDrive: 'F:',
+      processStartTime: '20260925200000.000000-240',
       command: 'C:/Program Files/nodejs/node.exe',
       args: ['--import', 'tsx', 'C:/repo/vlc-dvd-streamer/src/server.ts'],
       stdoutLogPath: 'C:/repo/vlc-dvd-streamer/.runtime/logs/manual-server.stdout.log',
@@ -47,6 +84,7 @@ describe('manual server control', () => {
     expect(state).toEqual({
       pid: 4242,
       startedAt: '2026-05-13T12:00:00.000Z',
+      processStartTime: '20260925200000.000000-240',
       repoRoot: 'C:/repo/vlc-dvd-streamer',
       host: '0.0.0.0',
       port: '3000',
