@@ -28,6 +28,10 @@ interface SeekBody {
   positionSeconds?: unknown
 }
 
+interface ViewerBody {
+  viewerToken?: unknown
+}
+
 export async function registerApiRoutes(app: FastifyInstance, context: AppContext): Promise<void> {
   app.get('/api/health', async () => getHealthSnapshot(context.config))
 
@@ -210,7 +214,10 @@ export async function registerApiRoutes(app: FastifyInstance, context: AppContex
       return sendApiError(reply, 404, 'Session not found.')
     }
 
-    const result = await sessionManager.reportPlayback(sessionId, request.body)
+    const viewerToken = parseViewerToken(request.body)
+    if (!viewerToken) return sendApiError(reply, 400, 'Viewer token is required.')
+
+    const result = await sessionManager.reportPlayback(sessionId, request.body, viewerToken)
     if (result === 'accepted') return reply.code(204).send()
     const statusCodeByReason = {
       stale: 409,
@@ -218,6 +225,36 @@ export async function registerApiRoutes(app: FastifyInstance, context: AppContex
       'not-found': 404,
     } satisfies Record<Exclude<typeof result, 'accepted'>, number>
     return sendApiError(reply, statusCodeByReason[result], `Playback feedback ${result}.`)
+  })
+
+  app.post<{ Params: SessionParams; Body: ViewerBody }>('/api/sessions/:sessionId/viewer/attach', async (request, reply) => {
+    const result = requestSessionViewer(request, context, 'attachViewer')
+    return sendViewerResult(reply, result)
+  })
+
+  app.post<{ Params: SessionParams; Body: ViewerBody }>('/api/sessions/:sessionId/viewer/takeover', async (request, reply) => {
+    const result = requestSessionViewer(request, context, 'takeOverViewer')
+    return sendViewerResult(reply, result)
+  })
+
+  app.post<{ Params: SessionParams; Body: ViewerBody }>('/api/sessions/:sessionId/viewer/release', async (request, reply) => {
+    const sessionManager = context.services.sessionManager
+    if (!sessionManager) {
+      return sendApiError(reply, 503, 'Session manager is not configured.')
+    }
+
+    const { sessionId } = request.params
+    if (!isValidSessionId(sessionId)) {
+      return sendApiError(reply, 400, 'Invalid session id.')
+    }
+    if (!sessionManager.getSession(sessionId)) {
+      return sendApiError(reply, 404, 'Session not found.')
+    }
+
+    const viewerToken = parseViewerToken(request.body)
+    if (!viewerToken) return sendApiError(reply, 400, 'Viewer token is required.')
+
+    return { released: sessionManager.releaseViewer(sessionId, viewerToken) }
   })
 
   app.delete<{ Params: SessionParams }>('/api/sessions/:sessionId', async (request, reply) => {
@@ -248,4 +285,35 @@ function parseFiniteSeconds(value: unknown): number | null {
 
   const parsed = Number(value)
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null
+}
+
+function parseViewerToken(value: unknown): string | null {
+  if (!value || typeof value !== 'object' || !('viewerToken' in value)) return null
+  const token = value.viewerToken
+  return typeof token === 'string' && token.trim().length > 0 && token.length <= 256 ? token : null
+}
+
+function requestSessionViewer(
+  request: { params: SessionParams; body: ViewerBody },
+  context: AppContext,
+  operation: 'attachViewer' | 'takeOverViewer',
+) {
+  const sessionManager = context.services.sessionManager
+  if (!sessionManager) return { ok: false as const, statusCode: 503, message: 'Session manager is not configured.' }
+
+  const { sessionId } = request.params
+  if (!isValidSessionId(sessionId)) return { ok: false as const, statusCode: 400, message: 'Invalid session id.' }
+  const viewerToken = parseViewerToken(request.body)
+  if (!viewerToken) return { ok: false as const, statusCode: 400, message: 'Viewer token is required.' }
+
+  return sessionManager[operation](sessionId, viewerToken)
+}
+
+function sendViewerResult(reply: Parameters<typeof sendApiError>[0], result: ReturnType<typeof requestSessionViewer>) {
+  if (!result.ok) {
+    if ('statusCode' in result) return sendApiError(reply, result.statusCode, result.message)
+    const statusCode = result.reason === 'not-found' ? 404 : 409
+    return sendApiError(reply, statusCode, result.reason === 'not-found' ? 'Session not found.' : 'Session is not ready for a viewer.')
+  }
+  return { active: result.active }
 }

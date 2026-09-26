@@ -10,6 +10,40 @@ import { VlcWorker } from '../../src/vlc/worker.js'
 import { createCatalogServiceStub, createSessionManagerStub } from '../helpers/app-stubs.js'
 
 describe('app API', () => {
+  it('redirects an ended player session to the catalog with a visible message', async () => {
+    const endedSession = {
+      discId: 'disc-001', drive: 'D:', titleNumber: 1,
+      id: 'ended-session', state: 'stopped' as const,
+      outputDir: '.cache/sessions/ended-session',
+      manifestPath: '.cache/sessions/ended-session/index.m3u8',
+      manifestUrl: '/streams/ended-session/index.m3u8',
+      startedAt: '2026-01-01T00:00:00.000Z', lastAccessedAt: '2026-01-01T00:00:00.000Z',
+    }
+    const app = await buildApp({
+      config: { host: '127.0.0.1', port: 3000, cacheDir: '.cache', vlcCandidates: [process.execPath] },
+      services: {
+        catalogService: createCatalogServiceStub(),
+        sessionManager: createSessionManagerStub({
+          getSession: (id) => id === endedSession.id ? endedSession : undefined,
+        }),
+      },
+    })
+
+    try {
+      const player = await app.inject({ method: 'GET', url: '/player/ended-session' })
+      expect(player.statusCode).toBe(302)
+      expect(player.headers.location).toBe('/?notice=session-ended')
+
+      const catalog = await app.inject({ method: 'GET', url: player.headers.location })
+      expect(catalog.statusCode).toBe(200)
+      expect(catalog.body).toContain('This playback session has ended. Choose a title to start a new stream.')
+
+      const expired = await app.inject({ method: 'GET', url: '/player/expired-session' })
+      expect(expired.statusCode).toBe(302)
+      expect(expired.headers.location).toBe('/?notice=session-ended')
+    } finally { await app.close() }
+  })
+
   it('renders the home page immediately while the catalog refresh continues in the background', async () => {
     const cacheDir = await mkdtemp(join(tmpdir(), 'vlc-dvd-streamer-api-home-'))
     let startRefreshCalls = 0

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { createRequire, stripTypeScriptTypes } from 'node:module'
 import { readFile } from 'node:fs/promises'
 import { extname } from 'node:path'
@@ -12,6 +13,7 @@ import { renderHomePage, renderPlayerPage } from '../../ui/page.js'
 
 interface HomeQuery {
   includeShort?: string
+  notice?: string
 }
 
 interface PlayerParams {
@@ -59,6 +61,9 @@ export async function registerUiRoutes(app: FastifyInstance, context: AppContext
       titles,
       includeShort,
       activeSession: sessionManager?.getActiveSession(),
+      notice: request.query.notice === 'session-ended'
+        ? 'This playback session has ended. Choose a title to start a new stream.'
+        : undefined,
     }))
   })
 
@@ -75,14 +80,18 @@ export async function registerUiRoutes(app: FastifyInstance, context: AppContext
     }
 
     const session = sessionManager.getSession(sessionId)
-    if (!session) {
-      return sendApiError(reply, 404, 'Session not found.')
+    if (!session || session.state === 'stopped' || session.state === 'failed') {
+      return reply.redirect('/?notice=session-ended')
     }
 
-    sessionManager.touch(sessionId)
+    const viewerToken = randomUUID()
+    const viewer = sessionManager.attachViewer(sessionId, viewerToken)
+    if (viewer.ok && viewer.active) sessionManager.touch(sessionId)
     reply.type('text/html').send(renderPlayerPage({
       session,
       manifestUrl: appendStreamFlag(session.manifestUrl, 'videoOnly', videoOnly),
+      viewerToken,
+      viewerActive: viewer.ok && viewer.active,
     }))
   })
 

@@ -114,6 +114,61 @@ describe('playback lifecycle ownership', () => {
     expect(sessions[0].id).toBe(sessions[1].id)
   })
 
+  it('cancels a different in-flight startup so the newer title can start promptly', async () => {
+    const firstEntered = deferred<void>()
+    let starts = 0
+    const manager = new SessionManager({
+      cacheDir: await mkdtemp(join(tmpdir(), 'session-supersede-')),
+      inactivityMs: 60000,
+      readinessTimeoutMs: 60000,
+      playbackRecovery: { enabled: false, stopTimeoutMs: 5 },
+      worker: { async startHlsSession(input) {
+        starts += 1
+        const handle = new Handle()
+        if (starts === 1) {
+          firstEntered.resolve()
+          return { manifestPath: join(input.outputDir, 'index.m3u8'), handle }
+        }
+        return { manifestPath: await output(input), handle }
+      } },
+    })
+
+    try {
+      const first = manager.start(request)
+      await firstEntered.promise
+      await vi.waitFor(() => expect(manager.getActiveSession()?.state).toBe('starting'))
+      const replacement = manager.start({ ...request, titleNumber: 2 })
+      await vi.waitFor(() => expect(starts).toBe(2), { timeout: 250 })
+      const [superseded, ready] = await Promise.all([first, replacement])
+
+      expect(superseded.state).toBe('failed')
+      expect(superseded.error?.detail).toContain('cancelled')
+      expect(ready).toMatchObject({ titleNumber: 2, state: 'ready' })
+      await expect(access(superseded.outputDir)).rejects.toThrow()
+    } finally { await manager.stopAll() }
+  })
+
+  it('keeps only the ten newest stopped session tombstones', async () => {
+    const manager = await setup({ async startHlsSession(input) {
+      return { manifestPath: await output(input), handle: new Handle() }
+    } })
+
+    try {
+      const sessions = []
+      for (let titleNumber = 1; titleNumber <= 11; titleNumber += 1) {
+        const session = await manager.start({ ...request, titleNumber })
+        sessions.push(session)
+        await manager.stop(session.id)
+      }
+
+      expect(manager.getSession(sessions[0]!.id)).toBeUndefined()
+      for (const session of sessions.slice(1)) {
+        expect(manager.getSession(session.id)?.state).toBe('stopped')
+      }
+      await expect(manager.readStreamAsset(sessions[1]!.id, 'segment-000001.ts')).resolves.toBeNull()
+    } finally { await manager.stopAll() }
+  })
+
   it('retires a deferred seek restart before stop deletes its files', async () => {
     const entered = deferred<void>(), release = deferred<void>()
     const handles: Handle[] = []
@@ -327,6 +382,27 @@ describe('playback lifecycle ownership', () => {
 
     expect(manager.getSession(session.id)?.state).toBe('stopped')
     await expect(access(session.outputDir)).rejects.toThrow()
+  })
+
+  it('stops after the configured maximum number of failed recovery restarts', async () => {
+    let starts = 0
+    const manager = await setup({ async startHlsSession(input) {
+      starts += 1
+      if (starts > 1) throw new Error('restart failed')
+      return { manifestPath: await output(input), handle: new Handle() }
+    } }, {
+      enabled: true,
+      monitorIntervalMs: 2,
+      stallTimeoutMs: 5,
+      readRetryAttempts: 0,
+      maxAttempts: 1,
+    })
+
+    try {
+      const session = await manager.start(request)
+      await vi.waitFor(() => expect(manager.getSession(session.id)?.state).toBe('failed'))
+      expect(starts).toBe(2)
+    } finally { await manager.stopAll() }
   })
 
   it('removes allocated files when the worker rejects before returning a handle', async () => {

@@ -21,6 +21,7 @@ const session: PlaybackSession = {
 }
 
 const report = {
+  viewerToken: 'page-a',
   manifestUrl: session.manifestUrl,
   reporterId: 'browser-1',
   sequence: 1,
@@ -30,7 +31,7 @@ const report = {
   playbackRate: 1,
 }
 
-async function setup(reportPlayback: (sessionId: string, body: unknown) => Promise<'accepted' | 'stale' | 'invalid' | 'not-found'>) {
+async function setup(reportPlayback: (sessionId: string, body: unknown, viewerToken: string) => Promise<'accepted' | 'stale' | 'invalid' | 'not-found'>) {
   const cacheDir = await mkdtemp(join(tmpdir(), 'vlc-dvd-streamer-feedback-'))
   const app = await buildApp({
     config: { host: '127.0.0.1', port: 3000, cacheDir, vlcCandidates: [process.execPath] },
@@ -52,7 +53,7 @@ describe('playback feedback API', () => {
       const response = await app.inject({ method: 'POST', url: '/api/sessions/session-1/playback', payload: report })
       expect(response.statusCode).toBe(204)
       expect(response.body).toBe('')
-      expect(reportPlayback).toHaveBeenCalledWith('session-1', report)
+      expect(reportPlayback).toHaveBeenCalledWith('session-1', report, 'page-a')
     } finally {
       await app.close()
     }
@@ -65,7 +66,7 @@ describe('playback feedback API', () => {
   ] as const)('maps manager result %s to HTTP %d', async (result, statusCode) => {
     const app = await setup(async () => result)
     try {
-      const response = await app.inject({ method: 'POST', url: '/api/sessions/session-1/playback', payload: { unexpected: true } })
+      const response = await app.inject({ method: 'POST', url: '/api/sessions/session-1/playback', payload: { ...report, unexpected: true } })
       expect(response.statusCode).toBe(statusCode)
     } finally {
       await app.close()

@@ -8,11 +8,13 @@ import { EventHub } from './events/event-hub.js'
 import { createFileLogSink } from './logging/file-log-sink.js'
 import { ServerLog } from './logging/server-log.js'
 import { SessionManager } from './session/session-manager.js'
+import { acquireSessionStorage } from './session/session-storage.js'
 import { findVlc } from './vlc/find-vlc.js'
 import { VlcWorker } from './vlc/worker.js'
 
 const config = loadConfig(process.env)
 await mkdir(config.cacheDir, { recursive: true })
+const sessionStorage = await acquireSessionStorage(config.cacheDir)
 
 const eventHub = new EventHub()
 const fileLogSink = createFileLogSink(config.logFile ?? `${config.cacheDir}/logs/server.log`)
@@ -32,6 +34,9 @@ const serverLog = new ServerLog(eventHub, 200, (line, entry) => {
   console.log(line)
 })
 serverLog.info('server', `Writing server log to ${fileLogSink.path}.`)
+if (!sessionStorage.swept) {
+  serverLog.warn('server', 'Another live server owns this cache; leaving its session directories untouched.')
+}
 
 // Resolve the optical drive: an explicit DVD_DRIVE always wins; otherwise
 // auto-detect the Windows optical drive (preferring one with a disc loaded) so
@@ -120,6 +125,8 @@ const app = await buildApp({
 
 app.addHook('onClose', async () => {
   clearInterval(cleanupTimer)
+  await sessionManager.stopAll()
+  await sessionStorage.release()
   await fileLogSink.close()
 })
 

@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test } from './helpers/test.js'
 import { openReadyCatalog } from './helpers/catalog.js'
 
 test('homepage renders catalog and starts a session', async ({ page }) => {

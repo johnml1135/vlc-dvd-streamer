@@ -7,7 +7,7 @@ import type { VlcWorker } from '../vlc/worker.js'
 
 export type CatalogServiceLike = Pick<CatalogService, 'getSnapshot' | 'startRefresh' | 'refresh' | 'listTitles' | 'findTitle'>
 export type EventHubLike = Pick<EventHub, 'publish' | 'subscribe'>
-export type SessionManagerLike = Pick<SessionManager, 'start' | 'seek' | 'getSession' | 'getActiveSession' | 'readStreamAsset' | 'touch' | 'stop' | 'stopAll' | 'reportPlayback'>
+  export type SessionManagerLike = Pick<SessionManager, 'start' | 'seek' | 'getSession' | 'getActiveSession' | 'readStreamAsset' | 'touch' | 'stop' | 'stopAll' | 'reportPlayback' | 'attachViewer' | 'takeOverViewer' | 'releaseViewer'>
 export type VlcWorkerLike = Pick<VlcWorker, 'generateThumbnail'>
 export type ServerLogLike = Pick<ServerLog, 'list'>
 

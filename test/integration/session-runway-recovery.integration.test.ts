@@ -218,6 +218,7 @@ describe('SessionManager runway-aware recovery', () => {
 
     try {
       const session = await manager.start({ discId: 'd', drive: 'D:', titleNumber: 1, durationSeconds: 40 })
+      expect(manager.attachViewer(session.id, 'viewer-1')).toEqual({ ok: true, active: true })
       await time.waitForScheduledTask()
       await worker.produceThrough(4)
       await time.advanceBy(FAST_RECOVERY.monitorIntervalMs)
@@ -350,6 +351,7 @@ describe('SessionManager runway-aware recovery', () => {
 
     try {
       const session = await manager.start({ discId: 'd', drive: 'D:', titleNumber: 1, durationSeconds: 40 })
+      expect(manager.attachViewer(session.id, 'viewer-1')).toEqual({ ok: true, active: true })
       await time.waitForScheduledTask()
       await worker.produceThrough(10)
       await time.advanceBy(FAST_RECOVERY.monitorIntervalMs)
@@ -363,7 +365,7 @@ describe('SessionManager runway-aware recovery', () => {
         bufferedEndSeconds: 20,
         paused: false,
         playbackRate: 1,
-      })).toBe('accepted')
+      }, 'viewer-1')).toBe('accepted')
 
       // Calendar jumps do not age the elapsed recovery evidence.
       calendarNow += 365 * 24 * 60 * 60 * 1000
@@ -398,6 +400,7 @@ describe('SessionManager runway-aware recovery', () => {
 
     try {
       const session = await manager.start({ discId: 'd', drive: 'D:', titleNumber: 1, durationSeconds: 40 })
+      expect(manager.attachViewer(session.id, 'viewer-1')).toEqual({ ok: true, active: true })
       await time.waitForScheduledTask()
       await worker.produceThrough(10)
       await time.advanceBy(FAST_RECOVERY.monitorIntervalMs)
@@ -412,7 +415,7 @@ describe('SessionManager runway-aware recovery', () => {
         bufferedEndSeconds: 20,
         paused: false,
         playbackRate: 1,
-      })).toBe('accepted')
+      }, 'viewer-1')).toBe('accepted')
       await time.advanceBy(FAST_RECOVERY.stallTimeoutMs)
       expect(worker.starts).toHaveLength(1)
 
@@ -425,7 +428,7 @@ describe('SessionManager runway-aware recovery', () => {
         bufferedEndSeconds: 20,
         paused: false,
         playbackRate: 1,
-      })).toBe('accepted')
+      }, 'viewer-1')).toBe('accepted')
       await time.advanceBy(FAST_RECOVERY.monitorIntervalMs)
       expect(worker.starts.length).toBeGreaterThan(1)
     } finally {

@@ -577,10 +577,39 @@ export class PlaybackSessionController {
         return progress
       }
 
+      const recoveryOptions = this.getRecoveryOptions()
+      const unreadableFirstSlot = session.publication.nextSlot === 1
+        && recoveryOptions.enabled && describeReadError(session.handle.getStderr()) !== null
+      if (unreadableFirstSlot) {
+        const runtime = session.recoveryRuntime
+        if (runtime.lastProgressAtMs === null) {
+          runtime.lastProgressAtMs = this.time.now()
+          runtime.retryAnchorSlot = 1
+        }
+        if (this.time.now() - runtime.lastProgressAtMs >= recoveryOptions.stallTimeoutMs) {
+          await this.performRecoveryStep(session, expectedIntentVersion)
+          if (session.state === 'failed') {
+            throw new Error(session.error?.detail ?? 'Playback recovery failed before the first HLS segment was ready.')
+          }
+          continue
+        }
+      }
+
       const status = await this.waitForWake(session, Math.min(100, Math.max(0, deadline - this.time.now())))
 
       if (status === 'exited') {
         const result = await session.handle.completion
+        if (session.publication.nextSlot === 1 && recoveryOptions.enabled
+          && describeReadError(result.stderr || session.handle.getStderr())) {
+          const runtime = session.recoveryRuntime
+          runtime.lastProgressAtMs = this.time.now() - recoveryOptions.stallTimeoutMs
+          runtime.retryAnchorSlot = 1
+          await this.performRecoveryStep(session, expectedIntentVersion)
+          if (session.state === 'failed') {
+            throw new Error(session.error?.detail ?? 'Playback recovery failed before the first HLS segment was ready.')
+          }
+          continue
+        }
         // Always surface the exit code/signal: on Windows a VLC crash often
         // produces no stderr, so the code is the only diagnostic available.
         const exit = `VLC exited before HLS output was ready (code ${result.code ?? 'null'}, signal ${result.signal ?? 'null'}).`
@@ -924,7 +953,8 @@ export class PlaybackSessionController {
   }
 
   private intentIsCurrent(session: SessionRecord, intentVersion: number): boolean {
-    return !this.stoppingRequested && session.state === 'ready' && this.intentVersion === intentVersion
+    return !this.stoppingRequested && (session.state === 'ready' || session.state === 'starting')
+      && this.intentVersion === intentVersion
   }
 
   private invalidateIntent(): void {
@@ -950,7 +980,7 @@ export class PlaybackSessionController {
       runtime.message = `Recovery restart failed: ${formatError(error)}`
       this.publishRecoveryEvent(session)
       this.options.logger?.warn('session', `Session ${session.id} recovery restart failed (${runtime.restartFailures}/${recoveryOptions.maxAttempts}): ${formatError(error)}`)
-      if (runtime.restartFailures > recoveryOptions.maxAttempts && this.intentVersion === intentVersion) {
+      if (runtime.restartFailures >= recoveryOptions.maxAttempts && this.intentVersion === intentVersion) {
         await this.exhaustRecovery(session)
       }
       return false
@@ -977,7 +1007,7 @@ export class PlaybackSessionController {
       startTimeSeconds,
       initialSegmentNumber,
     })
-    if (expectedIntentVersion !== undefined && (this.intentVersion !== expectedIntentVersion || this.stoppingRequested || session.state !== 'ready')) {
+    if (expectedIntentVersion !== undefined && !this.intentIsCurrent(session, expectedIntentVersion)) {
       try {
         await this.stopHandle(runtime.handle, `cancelled recovery restart for session ${session.id}`)
       } catch (error) {

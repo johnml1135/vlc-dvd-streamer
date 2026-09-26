@@ -27,11 +27,16 @@ describe('renderPlayerPage', () => {
         },
       },
       manifestUrl: '/streams/session-123/index.m3u8?videoOnly=1',
+      viewerToken: 'page-token-1',
+      viewerActive: true,
     })
 
     expect(html).toContain('<script type="module" src="/assets/browser-playback.js"></script>')
     expect(html).toContain('data-manifest-url="/streams/session-123/index.m3u8?videoOnly=1"')
     expect(html).toContain('data-session-manifest-url="/streams/session-123/index.m3u8"')
+    expect(html).toContain('data-viewer-token="page-token-1"')
+    expect(html).toContain('data-viewer-active="true"')
+    expect(html).toContain('id="viewer-passive"')
     expect(html).toContain('Server log')
     expect(html).toContain("fetch('/api/logs')")
     expect(html).toContain("event.type === 'server.log'")
