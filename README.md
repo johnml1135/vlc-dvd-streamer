@@ -8,6 +8,8 @@ No ripping workflow. No library management. No mystery VLC window on the client.
 
 - Auto-detects the optical drive (the one with a disc loaded) so you usually don't need to configure a drive letter.
 - Scans the inserted DVD almost instantly by reading its IFO files directly, and shows a title grid with thumbnails.
+- Recognises a disc it has seen before (by fingerprinting its IFO files, not by drive letter) and shows its catalog and thumbnails immediately.
+- Tells you plainly when another program is holding the drive, instead of hanging.
 - Highlights the likely main feature while keeping shorter extras available.
 - Lets you choose audio and subtitle burn-in options before playback starts.
 - Starts a server-owned VLC session and serves browser-safe HLS from the app.
@@ -17,6 +19,7 @@ No ripping workflow. No library management. No mystery VLC window on the client.
 - Restarts VLC at the requested DVD time when you jump to an unloaded area.
 - Keeps generated segments for the active session and stitches watched/jumped ranges into a cache manifest.
 - Detects stalled DVD reads, fills unreadable sectors with a brief placeholder so the timeline stays accurate, and resumes instead of hanging forever.
+- Lets one device watch at a time, with a one-click takeover when you move to another screen.
 - Includes a live server log drawer so you can see what the box is doing.
 - Runs as a local-network appliance with a Windows scheduled task and firewall rule.
 
@@ -62,10 +65,12 @@ http://192.168.1.25:3000
 When a disc is ready, the home page shows title cards with thumbnails, durations, and playback options.
 
 - `Show extras` reveals short bonus titles that are hidden by default.
-- `Refresh Disc` rescans after swapping discs.
+- `Refresh Disc` always does a full rescan. A disc the app has seen before is recognised on insert and its saved catalog and thumbnails appear straight away.
 - `Start Stream` starts the selected title.
 - `Open player` returns to the current active stream.
-- Starting another title replaces the current stream, because v1 intentionally supports one active playback session.
+- Starting another title replaces the current stream, because v1 intentionally supports one active playback session. This works even while the previous title is still starting, so you never wait behind a stuck start.
+- If another program is using the drive, `Start Stream` and `Refresh Disc` fail straight away with "The DVD drive is in use by another program" and a `Retry` button.
+- If several optical drives contain discs, the first one is used and the server log names the others. Set `DVD_DRIVE` to choose.
 
 ### Player
 
@@ -78,6 +83,11 @@ The player page has the browser video element plus a full-title timeline.
 - `Stitched cache` points at a generated manifest that joins the retained ranges with HLS discontinuity markers where gaps still exist.
 - `Back to titles` leaves the stream running while you browse titles.
 - `Stop Stream` ends VLC and cleans up the session.
+- If a stream fails or ends, the player says so and offers a way back rather than showing a frozen video. An old player link for a stream that has ended shows an "ended" page; links older than the last ten stopped streams return to the title list.
+
+### One Viewer At A Time
+
+A stream plays on one device at a time. If you open the player on a second device while the first is still playing, the second one shows "Playing on another device — Take over?" and plays nothing until you confirm. After a takeover, the first device shows "Watching elsewhere" with a `Take back` button. If the first device has gone away (closed, asleep, turned off) and has reported nothing for about 15 seconds, the new device takes over without asking. Reloading the page on the same device keeps ownership.
 
 ## Scratched Disc Recovery 💪
 
@@ -89,6 +99,8 @@ The title is modelled as a fixed grid of 2-second slots, where slot *N* always r
 2. **focuses on what plays next.** Because VLC transcodes faster than real time, a stall usually leaves a healthy buffer of already-produced content sitting ahead of the viewer. The server measures that *runway* — the gap between VLC's produced edge and the segment the browser has most recently fetched — and uses it to decide how hard to try before giving up. While the buffer is healthy it keeps retrying the **same** spot (the drive often reads through a rough patch on a later pass); if the still-running VLC simply went quiet, it is even left alone briefly to clear the hiccup itself with no disruptive restart.
 3. only when the spot stays unreadable **and** the viewer is about to catch up to it (or the retry cap is reached) does it fill exactly that one 2-second slot with a short "bad sector" placeholder, mark an HLS discontinuity, and restart playback at the very next slot
 4. repeats one slot at a time for as long as the disc is unreadable, then resumes normal playback the instant a readable sector returns
+
+This also applies to the very first slot: a title that starts on a bad sector gets a placeholder and carries on instead of failing to start.
 
 Because each unreadable slot is filled at its true position, a bad sector costs *exactly* its real length — a 6-second scratch fills 6 seconds, never a large jump. The browser plays a single server-composed manifest that stays anchored to the playback position and grows in place, so the displayed time always matches the disc. A manual seek opens a fresh region and re-reads from the target.
 
@@ -141,6 +153,10 @@ The same log is also appended to a file on disk so failures survive after the in
 
 On Windows, VLC can show modal error popups even with its dummy interface. The app disables VLC interaction and Qt error dialogs for playback, scanning, and thumbnail commands. During startup the log reports periodic progress with the VLC PID; a timeout includes the final stderr tail and whether VLC was still running. If a popup appears, check that the app is using the configured VLC executable and review the latest `session` and `catalog` log entries.
 
+The app cleans up after itself even after a crash. Each VLC run works in its own scratch folder under the cache, so VLC's console output (which Windows VLC writes to a `vlc-help.txt` in its working folder) never lands in the app directory. On startup the server removes session folders left behind by a previous run, and stops any VLC process that it started itself and that is still running (matched by process id and start time). It never touches a VLC you opened yourself.
+
+If the page will not load at all, check that nothing else is listening on the same port. Other home-media tools often default to `3000` too; set `PORT` (or reinstall with `-Port`) to move this app.
+
 Installed runtime files live under `.runtime`:
 
 - `.runtime\installed-settings.json`
@@ -172,5 +188,6 @@ If another machine cannot connect:
 ## More Docs 📚
 
 - Playback ownership, recovery flow, browser feedback, and HLS guarantees: [docs/architecture.md](docs/architecture.md)
-- Developer setup, fake VLC, tests, and planning links: [docs/development.md](docs/development.md)
+- Developer setup, fake VLC profiles, the synthetic test DVD, `npm run test:vlc`, and planning links: [docs/development.md](docs/development.md)
+- Domain glossary (Playback session, Active viewer, Disc identity, and so on): [CONTEXT.md](CONTEXT.md)
 - License: [LICENSE](LICENSE)
