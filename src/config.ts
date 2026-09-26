@@ -1,3 +1,5 @@
+import { normalizeDvdSource } from './disc/dvd-source.js'
+
 export interface AppConfig {
   host: string
   port: number
@@ -36,7 +38,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
       'C:/Program Files/VideoLAN/VLC/vlc.exe',
       'C:/Program Files (x86)/VideoLAN/VLC/vlc.exe',
     ].filter((value): value is string => Boolean(value)),
-    drive: env.DVD_DRIVE ?? 'D:',
+    drive: normalizeDvdSource(env.DVD_DRIVE ?? 'D:'),
     minVisibleTitleDurationSeconds: parsePositiveIntegerEnv(env.MIN_VISIBLE_TITLE_SECONDS, 'MIN_VISIBLE_TITLE_SECONDS', 300),
     inactiveSessionMs: parsePositiveIntegerEnv(env.INACTIVE_SESSION_MS, 'INACTIVE_SESSION_MS', 900000),
     vlcTimeoutMs: parsePositiveIntegerEnv(env.VLC_TIMEOUT_MS, 'VLC_TIMEOUT_MS', 30000),

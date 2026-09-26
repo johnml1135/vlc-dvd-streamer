@@ -3,7 +3,7 @@ import { mkdir } from 'node:fs/promises'
 import { buildApp } from './app.js'
 import { loadConfig } from './config.js'
 import { CatalogService } from './disc/catalog-service.js'
-import { detectOpticalDrive } from './disc/optical-drive.js'
+import { resolveDvdSource } from './disc/optical-drive.js'
 import { EventHub } from './events/event-hub.js'
 import { createFileLogSink } from './logging/file-log-sink.js'
 import { ServerLog } from './logging/server-log.js'
@@ -36,16 +36,11 @@ serverLog.info('server', `Writing server log to ${fileLogSink.path}.`)
 // Resolve the optical drive: an explicit DVD_DRIVE always wins; otherwise
 // auto-detect the Windows optical drive (preferring one with a disc loaded) so
 // the app does not silently probe the wrong letter.
-const explicitDrive = process.env.DVD_DRIVE?.trim()
-let resolvedDrive = explicitDrive || config.drive || 'D:'
-if (!explicitDrive) {
-  const detectedDrive = await detectOpticalDrive()
-  if (detectedDrive) {
-    resolvedDrive = detectedDrive
-    serverLog.info('server', `Auto-detected optical drive ${detectedDrive}.`)
-  } else {
-    serverLog.warn('server', `Could not auto-detect an optical drive; using ${resolvedDrive}. Set DVD_DRIVE to override.`)
-  }
+const sourceResolution = await resolveDvdSource(process.env.DVD_DRIVE)
+const resolvedDrive = sourceResolution.source
+if (sourceResolution.detected) serverLog.info('server', `Auto-detected optical drive ${resolvedDrive}.`)
+if (!sourceResolution.explicit && !sourceResolution.detected) {
+  serverLog.warn('server', `Could not auto-detect an optical drive; using ${resolvedDrive}. Set DVD_DRIVE to override.`)
 }
 
 serverLog.info('server', `Bootstrapping DVD Streamer with host=${config.host}, port=${config.port}, drive=${resolvedDrive}, cacheDir=${config.cacheDir}.`)
@@ -68,6 +63,7 @@ const worker = new VlcWorker({
   executable: resolvedVlc.path ?? config.vlcCandidates[0] ?? process.execPath,
   drive: resolvedDrive,
   timeoutMs: config.vlcTimeoutMs ?? 30000,
+  cacheDir: config.cacheDir,
   shimScript: config.vlcShimScript,
   trackMetadataScript: defaultTrackMetadataScript,
   logger: serverLog,

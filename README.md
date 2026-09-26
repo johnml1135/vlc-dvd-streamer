@@ -40,7 +40,7 @@ Run this from an elevated PowerShell window on the Windows PC with the DVD drive
 npm run install:windows -- -Drive F: -Port 3000 -VlcPath 'C:\Program Files\VideoLAN\VLC\vlc.exe'
 ```
 
-`-Drive` is optional — if you omit it (or don't set `DVD_DRIVE`), the app auto-detects the optical drive with a disc loaded. Use the drive letter for your DVD drive. The installer will:
+`-Drive` is optional — if you omit it (or don't set `DVD_DRIVE`), the app auto-detects the optical drive with a disc loaded. `DVD_DRIVE` accepts a drive letter such as `F:`, an absolute DVD folder path containing `VIDEO_TS`, or an absolute `.iso` path. The installer will:
 
 - build the app for production use
 - save the selected drive, port, and VLC path
@@ -138,6 +138,8 @@ Use `npm stop` to stop the background server. Use `npm run start:foreground` if 
 The player includes a `Server log` drawer with live events for disc scans, session startup, stream lifecycle, seek recovery, and scratched-disc handling.
 
 The same log is also appended to a file on disk so failures survive after the in-memory buffer rolls over and after the process exits. By default it is written to `.cache\logs\server.log` (override with the `LOG_FILE` environment variable). When VLC exits or crashes — for example while starting a session with subtitles — its captured stderr and exit code are recorded in this file under the `session` scope, which is the first place to look when a stream fails to start.
+
+On Windows, VLC can show modal error popups even with its dummy interface. The app disables VLC interaction and Qt error dialogs for playback, scanning, and thumbnail commands. During startup the log reports periodic progress with the VLC PID; a timeout includes the final stderr tail and whether VLC was still running. If a popup appears, check that the app is using the configured VLC executable and review the latest `session` and `catalog` log entries.
 
 Installed runtime files live under `.runtime`:
 

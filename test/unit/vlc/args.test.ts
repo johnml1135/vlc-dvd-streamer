@@ -6,6 +6,16 @@ describe('buildDvdDiscMrl', () => {
   it('builds a Windows DVD disc MRL with an explicit root slash', () => {
     expect(buildDvdDiscMrl({ drive: 'D:' })).toBe('dvd:///D:/')
   })
+
+  it('builds DVD MRLs for absolute folder and ISO sources', () => {
+    expect(buildDvdDiscMrl({ drive: 'C:\\dvd media\\DISC' })).toBe('dvd:///C:/dvd%20media/DISC/')
+    expect(buildDvdDiscMrl({ drive: 'C:\\images\\disc.iso' })).toBe('dvd:///C:/images/disc.iso')
+    expect(buildDvdTitleMrl({ drive: 'C:\\dvd media\\DISC', titleNumber: 2 })).toBe('dvd:///C:/dvd%20media/DISC/#2')
+  })
+
+  it('rejects relative DVD source paths', () => {
+    expect(() => buildDvdDiscMrl({ drive: 'fixtures/disc' })).toThrow(/absolute|drive letter/i)
+  })
 })
 
 describe('buildDvdTitleMrl', () => {

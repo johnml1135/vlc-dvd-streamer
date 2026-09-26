@@ -47,6 +47,12 @@ describe('loadConfig', () => {
     expect(loadConfig({ CACHE_DIR: 'C:/data' }).logFile).toBe('C:/data/logs/server.log')
   })
 
+  it('accepts an absolute DVD folder or ISO path and rejects relative DVD_DRIVE values', () => {
+    expect(loadConfig({ DVD_DRIVE: 'C:\\fixtures\\sample-disc' }).drive).toBe('C:\\fixtures\\sample-disc')
+    expect(loadConfig({ DVD_DRIVE: 'C:\\images\\sample.iso' }).drive).toBe('C:\\images\\sample.iso')
+    expect(() => loadConfig({ DVD_DRIVE: '.\\fixtures\\disc' })).toThrow(/absolute|drive letter/i)
+  })
+
   it('rejects invalid numeric environment values', () => {
     expect(() => loadConfig({ PORT: 'abc' })).toThrow(/PORT/i)
     expect(() => loadConfig({ VLC_TIMEOUT_MS: '-1000' })).toThrow(/VLC_TIMEOUT_MS/i)

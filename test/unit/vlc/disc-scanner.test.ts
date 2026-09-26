@@ -125,6 +125,27 @@ describe('VlcDiscScanner', () => {
     ])
   })
 
+  it('reads a folder source from its VIDEO_TS child and preserves that source in the catalog scan', async () => {
+    const runProcess = vi.fn(async () => completed({}))
+    let requestedPath = ''
+    const scanner = new VlcDiscScanner({
+      executable: 'vlc',
+      drive: 'C:\\fixtures\\sample-disc',
+      timeoutMs: 30000,
+      runProcess,
+      readIfoTitles: async (videoTsDir) => {
+        requestedPath = videoTsDir
+        return [{ titleNumber: 1, durationSeconds: 26, angleCount: 1, chapterCount: 2, audioTracks: [], subtitleTracks: [] }]
+      },
+    })
+
+    const scan = await scanner.scanDisc()
+
+    expect(requestedPath).toBe('C:/fixtures/sample-disc/VIDEO_TS')
+    expect(scan.drive).toBe('C:\\fixtures\\sample-disc')
+    expect(runProcess).not.toHaveBeenCalled()
+  })
+
   it('rejects shim scan payloads that do not match the disc metadata shape', async () => {
     const scanner = new VlcDiscScanner({
       executable: 'node',

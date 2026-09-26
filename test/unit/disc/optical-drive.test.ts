@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { detectOpticalDrive, parseOpticalDrives, selectOpticalDrive } from '../../../src/disc/optical-drive.js'
+import { detectOpticalDrive, parseOpticalDrives, resolveDvdSource, selectOpticalDrive } from '../../../src/disc/optical-drive.js'
 
 describe('parseOpticalDrives', () => {
   it('parses drive + media-loaded lines and ignores noise', () => {
@@ -72,5 +72,18 @@ describe('detectOpticalDrive', () => {
   it.skipIf(process.platform !== 'win32')('detects via the real PowerShell path on Windows', async () => {
     const result = await detectOpticalDrive()
     expect(result === null || /^[A-Z]:$/.test(result)).toBe(true)
+  })
+})
+
+describe('resolveDvdSource', () => {
+  it('uses an explicit folder source without running optical drive detection', async () => {
+    let detected = false
+    const result = await resolveDvdSource('C:\\fixtures\\sample-disc', async () => {
+      detected = true
+      return 'F:'
+    })
+
+    expect(result).toEqual({ source: 'C:\\fixtures\\sample-disc', explicit: true, detected: false })
+    expect(detected).toBe(false)
   })
 })

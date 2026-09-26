@@ -28,6 +28,7 @@ export default defineConfig({
         test: {
           name: 'integration',
           include: ['test/integration/**/*.test.ts'],
+          exclude: ['test/integration/vlc/real-vlc.integration.test.ts'],
           environment: 'node',
           fileParallelism: false,
           setupFiles: ['test/helpers/temp-dir.ts'],

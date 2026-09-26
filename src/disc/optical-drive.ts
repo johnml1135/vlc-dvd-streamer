@@ -1,5 +1,6 @@
 import { runManagedProcess, type CompletedProcess } from '../vlc/process-supervisor.js'
 import { createCommandSpec } from '../vlc/command-spec.js'
+import { normalizeDvdSource } from './dvd-source.js'
 
 export interface OpticalDrive {
   drive: string
@@ -58,6 +59,20 @@ export async function detectOpticalDrive(options: DetectOpticalDriveOptions = {}
     return selectOpticalDrive(parseOpticalDrives(output))
   } catch {
     return null
+  }
+}
+
+export async function resolveDvdSource(
+  configuredSource: string | undefined,
+  detect: () => Promise<string | null> = detectOpticalDrive,
+): Promise<{ source: string; explicit: boolean; detected: boolean }> {
+  const configured = configuredSource?.trim()
+  if (configured) return { source: normalizeDvdSource(configured), explicit: true, detected: false }
+  const detectedSource = await detect()
+  return {
+    source: detectedSource ?? 'D:',
+    explicit: false,
+    detected: detectedSource !== null,
   }
 }
 

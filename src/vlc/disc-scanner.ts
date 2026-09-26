@@ -1,11 +1,20 @@
 import { createHash } from 'node:crypto'
+import { createRequire } from 'node:module'
+import { join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { createCommandSpec, type CommandSpec } from './command-spec.js'
 import type { RawDiscScan, RawDiscTitle } from '../disc/types.js'
 import type { ServerLog } from '../logging/server-log.js'
 import { applyInferredTrackLabels, enrichTrackLabels, extractPlayableTitleNumbers, extractSelectedAudioTrackId, extractSelectedSubtitleTrackId, mergeTitleProbeMetadata, parseTitleProbeLog, type InferredTrackLabels, type RuntimeTrackMetadata } from './scan-parser.js'
 import { runManagedProcess, type CompletedProcess } from './process-supervisor.js'
-import { FALLBACK_AUDIO_LANGUAGE, PRIMARY_AUDIO_LANGUAGE, buildDiscProbeCommand, buildLanguageProbeCommand, buildTitleProbeCommand, buildTrackMetadataCommand } from './probe-commands.js'
+import { FALLBACK_AUDIO_LANGUAGE, PRIMARY_AUDIO_LANGUAGE, buildDiscProbeCommand, buildLanguageProbeCommand, buildScanArgs, buildTitleProbeCommand, buildTrackMetadataCommand } from './probe-commands.js'
 import { readDvdTitlesFromIfo, type IfoTitle } from '../disc/ifo-reader.js'
+import { buildDvdDiscMrl } from './mrl.js'
+import { createVlcScratchDir, removeVlcScratchDir } from './scratch.js'
+import { isDvdDriveLetter, isDvdIsoPath, normalizeDvdSource } from '../disc/dvd-source.js'
+
+const require = createRequire(import.meta.url)
+const tsxLoaderUrl = pathToFileURL(require.resolve('tsx')).href
 
 export type IfoTitleReader = (videoTsDir: string) => Promise<IfoTitle[]>
 
@@ -34,6 +43,7 @@ export interface VlcDiscScannerOptions {
   shimScript?: string
   trackMetadataScript?: string
   shimEnv?: NodeJS.ProcessEnv
+  cacheDir?: string
   logger?: Pick<ServerLog, 'info' | 'warn' | 'error'>
   runProcess?: ProcessRunner
   readIfoTitles?: IfoTitleReader
@@ -79,7 +89,15 @@ export class VlcDiscScanner {
   }
 
   private async scanDiscFromIfo(drive: string, onProgress?: (progress: DiscScanProgress) => void): Promise<RawDiscScan | null> {
-    const videoTsDir = `${drive.replace(/[/\\]+$/, '')}/VIDEO_TS`
+    const normalizedSource = normalizeDvdSource(drive)
+    if (isDvdIsoPath(normalizedSource)) {
+      this.options.logger?.info('catalog', `Skipping IFO file parsing for ISO source ${normalizedSource}; VLC will probe it directly.`)
+      return null
+    }
+    const sourcePath = normalizedSource.replaceAll('\\', '/').replace(/\/+$/, '')
+    const videoTsDir = isDvdDriveLetter(normalizedSource)
+      ? `${normalizedSource}/VIDEO_TS`
+      : /\/VIDEO_TS$/i.test(sourcePath) ? sourcePath : `${sourcePath}/VIDEO_TS`
     try {
       const ifoTitles = await this.readIfoTitles(videoTsDir)
       const titles: RawDiscTitle[] = ifoTitles
@@ -105,7 +123,8 @@ export class VlcDiscScanner {
   }
 
   private async scanDiscWithShim(drive: string): Promise<RawDiscScan> {
-    const result = await this.runProcess(this.buildShimCommand('vlc-scan', ['--mode=scan', `--drive=${drive}`]))
+    const command = this.buildShimCommand('vlc-scan', buildScanArgs(buildDvdDiscMrl({ drive })))
+    const result = await this.runVlcCommand(command)
     const payload = result.stdout
       .split(/\r?\n/)
       .map((line) => line.trim())
@@ -121,7 +140,7 @@ export class VlcDiscScanner {
 
   private async scanDiscWithRealVlc(drive: string, onProgress?: (progress: DiscScanProgress) => void): Promise<RawDiscScan> {
     this.options.logger?.info('catalog', `Running VLC disc probe for ${drive}.`)
-    const discProbe = await this.runProcess(buildDiscProbeCommand({
+    const discProbe = await this.runVlcCommand(buildDiscProbeCommand({
       executable: this.options.executable,
       drive,
       timeoutMs: this.options.timeoutMs,
@@ -216,7 +235,7 @@ export class VlcDiscScanner {
   }
 
   private async runTitleProbe(drive: string, titleNumber: number, audioLanguage: string) {
-    const titleProbe = await this.runProcess(buildTitleProbeCommand({
+    const titleProbe = await this.runVlcCommand(buildTitleProbeCommand({
       executable: this.options.executable,
       drive,
       titleNumber,
@@ -235,7 +254,7 @@ export class VlcDiscScanner {
       return null
     }
 
-    const result = await this.runProcess(buildTrackMetadataCommand({
+    const result = await this.runVlcCommand(buildTrackMetadataCommand({
       drive,
       titleNumber,
       timeoutMs: this.options.timeoutMs,
@@ -306,7 +325,7 @@ export class VlcDiscScanner {
   }
 
   private async runLanguageSelectionProbe(drive: string, titleNumber: number, languageCode: string) {
-    const probe = await this.runProcess(buildLanguageProbeCommand({
+    const probe = await this.runVlcCommand(buildLanguageProbeCommand({
       executable: this.options.executable,
       drive,
       titleNumber,
@@ -324,13 +343,22 @@ export class VlcDiscScanner {
 
     return createCommandSpec({
       executable: this.options.executable,
-      args: ['--import', 'tsx', this.options.shimScript, ...args],
+      args: ['--import', tsxLoaderUrl, resolve(this.options.shimScript), ...args],
       timeoutMs,
       label,
       env: this.options.shimEnv
         ? { ...process.env, ...this.options.shimEnv }
         : undefined,
     })
+  }
+
+  private async runVlcCommand(command: CommandSpec): Promise<CompletedProcess> {
+    const cwd = await createVlcScratchDir(this.options.cacheDir ?? join(process.cwd(), '.cache'))
+    try {
+      return await this.runProcess({ ...command, cwd })
+    } finally {
+      await removeVlcScratchDir(cwd)
+    }
   }
 }
 

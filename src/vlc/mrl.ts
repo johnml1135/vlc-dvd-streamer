@@ -1,3 +1,5 @@
+import { isDvdDriveLetter, isDvdIsoPath, normalizeDvdSource } from '../disc/dvd-source.js'
+
 export interface DvdDiscMrlInput {
   drive: string
 }
@@ -8,7 +10,10 @@ export interface DvdTitleMrlInput {
 }
 
 export function buildDvdDiscMrl(input: DvdDiscMrlInput): string {
-  return `dvd:///${normalizeDrive(input.drive)}/`
+  const source = normalizeDvdSource(input.drive)
+  if (isDvdDriveLetter(source)) return `dvd:///${source}/`
+  const normalizedPath = encodeWindowsPath(source)
+  return isDvdIsoPath(source) ? `dvd:///${normalizedPath}` : `dvd:///${normalizedPath}/`
 }
 
 export function buildDvdTitleMrl(input: DvdTitleMrlInput): string {
@@ -19,11 +24,11 @@ export function buildDvdTitleMrl(input: DvdTitleMrlInput): string {
   return `${buildDvdDiscMrl({ drive: input.drive })}#${input.titleNumber}`
 }
 
-function normalizeDrive(drive: string): string {
-  const trimmed = drive.trim()
-  if (!/^[a-z]:$/i.test(trimmed)) {
-    throw new Error('DVD drive must be a Windows drive letter like D:.')
-  }
-
-  return trimmed.toUpperCase()
+function encodeWindowsPath(path: string): string {
+  const slashPath = path.replaceAll('\\', '/')
+  const match = /^([a-z]:)(?:\/(.*))?$/i.exec(slashPath)
+  if (!match) throw new Error('DVD source path must be an absolute Windows path.')
+  const root = match[1]!.toUpperCase()
+  const segments = (match[2] ?? '').split('/').filter(Boolean).map((segment) => encodeURIComponent(segment))
+  return [root, ...segments].join('/')
 }

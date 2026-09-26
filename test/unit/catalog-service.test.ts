@@ -6,6 +6,27 @@ import { CatalogService } from '../../src/disc/catalog-service.js'
 import type { CatalogSnapshot, RawDiscScan } from '../../src/disc/types.js'
 
 describe('CatalogService', () => {
+  it('preserves an absolute DVD folder source in the catalog summary', async () => {
+    const cacheDir = await mkdtemp(join(tmpdir(), 'vlc-dvd-streamer-catalog-folder-'))
+    const folderSource = 'C:\\fixtures\\sample-disc'
+    const service = new CatalogService({
+      cacheDir,
+      drive: folderSource,
+      minVisibleTitleDurationSeconds: 1,
+      worker: {
+        scanDisc: async () => ({
+          discId: 'folder-disc',
+          drive: folderSource,
+          titles: [{ titleNumber: 1, durationSeconds: 20, audioTracks: [], subtitleTracks: [] }],
+        }),
+      } as never,
+    })
+
+    const snapshot = await service.refresh()
+
+    expect(snapshot.disc?.drive).toBe(folderSource)
+  })
+
   it('preserves an empty audio track list so the UI can fall back to automatic selection', async () => {
     const cacheDir = await mkdtemp(join(tmpdir(), 'vlc-dvd-streamer-catalog-unit-'))
     const scan: RawDiscScan = {

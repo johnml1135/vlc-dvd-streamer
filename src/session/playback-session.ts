@@ -152,6 +152,7 @@ export interface PlaybackSessionControllerOptions {
   cacheDir: string
   worker: HlsSessionWorker
   readinessTimeoutMs?: number
+  startupProgressIntervalMs?: number
   playbackRecovery?: PlaybackRecoveryOptions
   onSessionEvent?: (event: SessionManagerEvent) => void
   logger?: ServerLog
@@ -567,6 +568,8 @@ export class PlaybackSessionController {
   private async waitForReadiness(session: SessionRecord): Promise<HlsProgress> {
     const expectedIntentVersion = this.intentVersion
     const deadline = this.time.now() + (this.options.readinessTimeoutMs ?? 120000)
+    const progressIntervalMs = Math.max(1, this.options.startupProgressIntervalMs ?? 10000)
+    let nextProgressAt = this.time.now() + progressIntervalMs
 
     while (this.time.now() < deadline) {
       const progress = await session.publication.observe(session.publicationEpoch, session.manifestPath)
@@ -577,22 +580,39 @@ export class PlaybackSessionController {
         return progress
       }
 
-      const status = await this.waitForWake(session, Math.min(100, Math.max(0, deadline - this.time.now())))
+      const now = this.time.now()
+      if (now >= nextProgressAt) {
+        this.logStartupProgress(session)
+        nextProgressAt = now + progressIntervalMs
+      }
+
+      const status = await this.waitForWake(session, Math.min(100, Math.max(0, deadline - now), Math.max(1, nextProgressAt - now)))
 
       if (status === 'exited') {
         const result = await session.handle.completion
         // Always surface the exit code/signal: on Windows a VLC crash often
         // produces no stderr, so the code is the only diagnostic available.
         const exit = `VLC exited before HLS output was ready (code ${result.code ?? 'null'}, signal ${result.signal ?? 'null'}).`
-        const output = result.stderr || result.stdout
-        throw new Error(output ? `${exit}\n${output}` : exit)
+        throw new Error(`${exit} stderr tail: ${formatStderrTail(result.stderr)}.`)
       }
       if (status === 'cancelled') {
         throw new Error('Playback startup was cancelled.')
       }
     }
 
-    throw new Error('Timed out waiting for HLS manifest and first segment.')
+    if (session.handle.hasExited?.()) {
+      const result = await session.handle.completion
+      throw new Error(`VLC exited before HLS output was ready (code ${result.code ?? 'null'}, signal ${result.signal ?? 'null'}). stderr tail: ${formatStderrTail(result.stderr)}.`)
+    }
+    throw new Error(`Timed out waiting for HLS manifest and first segment; VLC pid ${session.handle.pid ?? 'unknown'} is still running (no exit code). stderr tail: ${formatStderrTail(session.handle.getStderr())}.`)
+  }
+
+  private logStartupProgress(session: SessionRecord): void {
+    const status = session.handle.hasExited?.() === false ? 'alive' : 'status unknown'
+    this.options.logger?.info(
+      'session',
+      `Still waiting for first HLS segment; VLC pid ${session.handle.pid ?? 'unknown'} ${status}, stderr tail: ${formatStderrTail(session.handle.getStderr())}.`,
+    )
   }
 
   private async waitForWake(session: SessionRecord, delayMs: number): Promise<'exited' | 'pending' | 'cancelled'> {
@@ -1176,4 +1196,11 @@ function describeReadError(stderr: string): string | null {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function formatStderrTail(stderr: string): string {
+  const normalized = stderr.trim()
+  if (!normalized) return '(empty)'
+  const maximumLength = 1200
+  return normalized.length > maximumLength ? `…${normalized.slice(-maximumLength)}` : normalized
 }

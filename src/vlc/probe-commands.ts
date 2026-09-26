@@ -36,6 +36,8 @@ export function buildScanArgs(mrl: string, options: ScanArgOptions = {}): string
   return [
     '--intf',
     'dummy',
+    '--no-interact',
+    '--no-qt-error-dialogs',
     '--no-video',
     '--vout',
     'dummy',

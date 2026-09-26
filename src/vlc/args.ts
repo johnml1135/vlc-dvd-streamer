@@ -1,5 +1,15 @@
-import { join } from 'node:path'
+import { existsSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { buildDvdTitleMrl } from './mrl.js'
+
+export function getPlaceholderAssetPath(name = 'placeholder.ts'): string {
+  const moduleDir = fileURLToPath(new URL('.', import.meta.url))
+  const compiledRootAsset = resolve(moduleDir, '../../assets', name)
+  return existsSync(compiledRootAsset)
+    ? compiledRootAsset
+    : resolve(moduleDir, '../../../assets', name)
+}
 
 export interface ThumbnailArgsInput {
   drive: string
@@ -34,6 +44,8 @@ export function buildThumbnailArgs(input: ThumbnailArgsInput): string[] {
   return [
     '--intf',
     'dummy',
+    '--no-interact',
+    '--no-qt-error-dialogs',
     '--no-video-title-show',
     '--start-time',
     String(input.startTimeSeconds),
@@ -53,6 +65,8 @@ export function buildHlsArgs(input: HlsArgsInput): string[] {
   const args = [
     '--intf',
     'dummy',
+    '--no-interact',
+    '--no-qt-error-dialogs',
     '--no-video-title-show',
     '--no-dvdnav-menu',
     '--deinterlace',
@@ -108,25 +122,27 @@ export function buildHlsArgs(input: HlsArgsInput): string[] {
 }
 
 /**
- * Builds VLC args that render a short "bad sector" placeholder clip with the
- * SAME codec parameters as the live stream, so it concatenates cleanly across a
- * discontinuity. NOTE: the exact source/filter options here should be confirmed
- * against a real VLC build on the host; callers treat failure as non-fatal and
- * fall back to a minimal placeholder.
+ * Re-encodes a committed two-second, 720x480 H.264/AAC placeholder transport
+ * stream using the live stream's output settings. VLC 3's fake input module
+ * does not exist, and its still-image demuxer exits immediately on this build,
+ * so a real MPEG-TS source keeps placeholder generation deterministic.
  */
 export function buildPlaceholderArgs(input: { outputPath: string; durationSeconds?: number }): string[] {
   const durationSeconds = input.durationSeconds ?? SEGMENT_DURATION_SECONDS
+  const sourcePath = getPlaceholderAssetPath()
   return [
     '--intf',
     'dummy',
+    '--no-interact',
+    '--no-qt-error-dialogs',
     '--no-video-title-show',
-    `--image-duration=${durationSeconds}`,
-    'fake://',
-    `--fake-duration=${durationSeconds * 1000}`,
-    '--fake-width=1280',
-    '--fake-height=720',
     `--run-time=${durationSeconds}`,
-    `--sout=#transcode{vcodec=h264,fps=${OUTPUT_FRAME_RATE},vb=800,keyint=${GOP_FRAMES},aenc=avcodec,acodec=mp4a,ab=128,channels=2,samplerate=48000}:std{access=file,mux=ts,dst=${input.outputPath}}`,
+    '--sout-x264-preset=veryfast',
+    `--sout-x264-keyint=${GOP_FRAMES}`,
+    `--sout-x264-min-keyint=${GOP_FRAMES}`,
+    '--sout-x264-scenecut=0',
+    sourcePath,
+    `--sout=#transcode{vcodec=h264,fps=${OUTPUT_FRAME_RATE},aenc=avcodec,acodec=mp4a,ab=128,channels=2,samplerate=48000}:std{access=file,mux=ts,dst=${input.outputPath}}`,
     'vlc://quit',
   ]
 }

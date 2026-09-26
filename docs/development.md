@@ -24,6 +24,8 @@ npm run build
 npm run start:foreground
 ```
 
+`DVD_DRIVE` also accepts an absolute DVD folder path or ISO path. A folder must contain `VIDEO_TS`; ISO catalog metadata is read by VLC rather than the IFO reader. Relative paths are rejected.
+
 ## Validation Commands
 
 Run these before calling a change complete:
@@ -36,6 +38,14 @@ npm run build
 npm run test:e2e
 ```
 
+The isolated real-VLC suite is separate from `npm test`:
+
+```powershell
+npm run test:vlc
+```
+
+It uses only the checked-in synthetic folder at `test/fixtures/dvd/`. If `VLC_PATH` and the default VLC executable locations are missing, the suite prints a skip reason. Never point this suite at a physical DVD drive.
+
 The coverage command writes text, HTML, and lcov reports under [../coverage](../coverage). The Playwright suite starts the app with the fake VLC environment configured by [../playwright.config.ts](../playwright.config.ts).
 
 ## Useful Scripts
@@ -45,6 +55,8 @@ The coverage command writes text, HTML, and lcov reports under [../coverage](../
 - `npm stop` stops the background host.
 - `npm run start:foreground` starts `src/server.ts` in the current terminal.
 - `npm run install:windows` installs the scheduled task and firewall rule.
+- `npm run test:vlc` runs the real-VLC integration suite against the synthetic DVD fixture.
+- `npm run build:dvd-fixture` regenerates the DVD fixture. It uses FFmpeg, `dvdauthor`, `spumux`, and adjacent `mplex` binaries; set `FFMPEG_PATH`, `DVDAUTHOR_PATH`, or `SPUMUX_PATH` to override the defaults under `C:\Program Files\DVDStyler\bin`.
 
 ## Fake VLC Profiles
 
@@ -59,6 +71,16 @@ Useful environment knobs include:
 - `FAKE_VLC_PROFILE=scratched-playback`
 - `FAKE_VLC_PROFILE=bad-sector-midplayback`
 - `FAKE_VLC_BAD_END_SECONDS=12`
+- `FAKE_VLC_PROFILE=hang-silent` (no output and stays alive)
+- `FAKE_VLC_PROFILE=drive-busy` (immediate cannot-open failure)
+- `FAKE_VLC_PROFILE=slow-start` with `FAKE_VLC_START_DELAY_MS`
+- `FAKE_VLC_PROFILE=dies-midstream` with `FAKE_VLC_SEGMENTS`
+- `FAKE_VLC_PROFILE=stall-then-resume` with `FAKE_VLC_STALL_AFTER_SEGMENTS` and `FAKE_VLC_STALL_MS`
+- `FAKE_VLC_PROFILE=eject-midstream` with `FAKE_VLC_SEGMENTS`
+
+The shim parses the same production VLC argv used by real runs and rejects options missing from `test/fixtures/vlc/vlc-help-3.0.23.txt`. Startup progress is logged every ten seconds by default, including the VLC PID and bounded stderr tail. The reusable placeholder is the committed `assets/placeholder.ts` transport stream; the app copies it into each session.
+
+The DVD fixture generator writes temporary files under `.cache/` and then updates `test/fixtures/dvd/VIDEO_TS/`. The generated disc has two NTSC titles, English and French audio, and an English subtitle stream.
 
 ## Architecture Pointers
 
