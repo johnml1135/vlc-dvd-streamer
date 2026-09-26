@@ -122,4 +122,24 @@ describe('renderHomePage', () => {
     expect(html).toContain('1 of 4 titles scanned')
     expect(html).toContain('Reading title 2')
   })
+
+  it('shows the drive-busy message and an explicit Retry action after the initial scan fails', () => {
+    const html = renderHomePage({
+      health: {
+        ok: true,
+        dependencies: { vlc: { found: true, path: 'vlc.exe' } },
+      },
+      snapshot: {
+        state: 'catalog_error',
+        disc: null,
+        error: { message: 'Could not read DVD titles.', detail: 'VLC reports the drive is in use by another program.' },
+      },
+      titles: [],
+      includeShort: false,
+    })
+
+    expect(html).toContain('The DVD drive is in use by another program')
+    expect(html).toContain('method="post" action="/actions/refresh"')
+    expect(html).toContain('>Retry</button>')
+  })
 })

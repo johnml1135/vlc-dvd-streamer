@@ -74,4 +74,39 @@ describe('browser event transport', () => {
     expect(Socket.instances).toHaveLength(2)
     first(); second()
   })
+
+  it('reconnects existing subscribers with backoff after a server restart', async () => {
+    vi.useFakeTimers()
+    try {
+      const { subscribeAppEvents } = await transport()
+      const listener = vi.fn()
+      const unsubscribe = subscribeAppEvents(listener)
+      Socket.instances[0].readyState = 3
+      Socket.instances[0].dispatchEvent(new Event('close'))
+
+      await vi.advanceTimersByTimeAsync(249)
+      expect(Socket.instances).toHaveLength(1)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(Socket.instances).toHaveLength(2)
+
+      Socket.instances[1].dispatchEvent(new Event('open'))
+      Socket.instances[1].message(JSON.stringify({ type: 'catalog.updated' }))
+      expect(listener).toHaveBeenCalledWith({ type: 'catalog.updated', payload: undefined })
+
+      Socket.instances[1].readyState = 3
+      Socket.instances[1].dispatchEvent(new Event('close'))
+      await vi.advanceTimersByTimeAsync(249)
+      expect(Socket.instances).toHaveLength(2)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(Socket.instances).toHaveLength(3)
+
+      unsubscribe()
+      Socket.instances[2].readyState = 3
+      Socket.instances[2].dispatchEvent(new Event('close'))
+      await vi.advanceTimersByTimeAsync(10000)
+      expect(Socket.instances).toHaveLength(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { detectOpticalDrive, parseOpticalDrives, selectOpticalDrive } from '../../../src/disc/optical-drive.js'
 
 describe('parseOpticalDrives', () => {
@@ -54,6 +54,18 @@ describe('detectOpticalDrive', () => {
     })
 
     expect(result).toBe('F:')
+  })
+
+  it('keeps first-loaded selection and reports every loaded drive when ambiguous', async () => {
+    const warn = vi.fn()
+    const result = await detectOpticalDrive({
+      platform: 'win32',
+      runPowerShell: async () => 'D:\tTrue\nF:\tTrue\nG:\tFalse\n',
+      onMultipleLoadedDrives: warn,
+    })
+
+    expect(result).toBe('D:')
+    expect(warn).toHaveBeenCalledWith(['D:', 'F:'])
   })
 
   it('returns null when detection throws', async () => {

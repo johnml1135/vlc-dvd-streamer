@@ -111,4 +111,74 @@ describe('action routes', () => {
       await app.close()
     }
   })
+
+  it('renders a drive-busy playback failure as an HTML Retry page with the selected values', async () => {
+    const catalogService = createCatalogServiceStub({
+      getSnapshot: () => ({
+        state: 'catalog_ready',
+        disc: {
+          discId: 'disc-001', drive: 'D:', titles: [{
+            id: 'disc-001-title-1', titleNumber: 1, label: 'Title 1', durationSeconds: 600,
+            likelyMainFeature: true, thumbnailUrl: '/thumb.jpg', audioTracks: [], subtitleTracks: [],
+          }],
+        },
+      }),
+      findTitle: () => ({
+        id: 'disc-001-title-1', titleNumber: 1, label: 'Title 1', durationSeconds: 600,
+        likelyMainFeature: true, thumbnailUrl: '/thumb.jpg', audioTracks: [], subtitleTracks: [],
+      }),
+    })
+    const start = vi.fn(async () => ({
+      state: 'failed',
+      error: { message: 'The DVD drive is in use by another program', detail: 'The device is busy.' },
+    } as never))
+    const app = await buildApp({
+      config: { host: '127.0.0.1', port: 3000, cacheDir: '.cache', vlcCandidates: [process.execPath] },
+      services: { catalogService, sessionManager: createSessionManagerStub({ start }) },
+    })
+
+    try {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/actions/play',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        payload: 'discId=disc-001&titleNumber=1&audioTrack=&subtitleTrack=',
+      })
+
+      expect(response.statusCode).toBe(502)
+      expect(response.headers['content-type']).toContain('text/html')
+      expect(response.body).toContain('The DVD drive is in use by another program')
+      expect(response.body).toContain('name="discId" value="disc-001"')
+      expect(response.body).toContain('name="titleNumber" value="1"')
+      expect(response.body).toContain('>Retry</button>')
+      expect(start).toHaveBeenCalledOnce()
+    } finally {
+      await app.close()
+    }
+  })
+
+  it('awaits one forced refresh and renders a drive-busy failure with Retry', async () => {
+    const failedSnapshot = {
+      state: 'catalog_error' as const,
+      disc: null,
+      error: { message: 'Could not read DVD titles.', detail: 'The DVD drive is in use by another program.' },
+    }
+    const refresh = vi.fn(async () => failedSnapshot)
+    const app = await buildApp({
+      config: { host: '127.0.0.1', port: 3000, cacheDir: '.cache', vlcCandidates: [process.execPath] },
+      services: { catalogService: createCatalogServiceStub({ refresh }) },
+    })
+
+    try {
+      const response = await app.inject({ method: 'POST', url: '/actions/refresh' })
+
+      expect(response.statusCode).toBe(503)
+      expect(response.headers['content-type']).toContain('text/html')
+      expect(response.body).toContain('The DVD drive is in use by another program')
+      expect(response.body).toContain('>Retry</button>')
+      expect(refresh).toHaveBeenCalledWith({ force: true })
+    } finally {
+      await app.close()
+    }
+  })
 })

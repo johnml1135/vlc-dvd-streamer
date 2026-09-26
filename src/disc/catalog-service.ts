@@ -1,8 +1,10 @@
-import { mkdir } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { VlcWorker } from '../vlc/worker.js'
 import type { CatalogProgress, CatalogSnapshot, DiscSummary, DiscTitle, RawDiscScan } from './types.js'
 import type { ServerLog } from '../logging/server-log.js'
+import { DRIVE_BUSY_MESSAGE, isDriveBusyMessage } from './drive-errors.js'
 
 export interface CatalogServiceOptions {
   cacheDir: string
@@ -44,16 +46,28 @@ export class CatalogService {
     return this.snapshot.disc?.titles.find((title) => title.titleNumber === titleNumber)
   }
 
+  async isDiscCurrent(discId: string): Promise<boolean> {
+    if (this.snapshot.disc?.discId !== discId) return false
+
+    const identifyDisc = (this.options.worker as VlcWorker & { identifyDisc?: (drive?: string) => Promise<string> }).identifyDisc
+    if (!identifyDisc) return true
+    try {
+      return await identifyDisc.call(this.options.worker, this.options.drive) === discId
+    } catch {
+      return false
+    }
+  }
+
   startRefresh(): void {
     void this.refresh()
   }
 
-  async refresh(): Promise<CatalogSnapshot> {
+  async refresh(input: { force?: boolean } = {}): Promise<CatalogSnapshot> {
     if (this.refreshPromise) {
       return this.refreshPromise
     }
 
-    this.refreshPromise = this.runRefresh()
+    this.refreshPromise = this.runRefresh(input.force === true)
     try {
       return await this.refreshPromise
     } finally {
@@ -61,25 +75,29 @@ export class CatalogService {
     }
   }
 
-  private async runRefresh(): Promise<CatalogSnapshot> {
+  private async runRefresh(force: boolean): Promise<CatalogSnapshot> {
     this.options.logger?.info('catalog', `Refreshing DVD catalog for ${this.options.drive}.`)
-    this.setSnapshot({
-      state: 'disc_detected',
-      disc: null,
-      progress: undefined,
-    })
-
-    this.setSnapshot({
-      state: 'catalog_loading',
-      disc: null,
-      progress: {
-        scannedTitles: 0,
-        totalTitles: null,
-        currentTitleNumber: null,
-      },
-    })
 
     try {
+      if (!force) {
+        const discId = await this.identifyCurrentDisc()
+        if (discId) {
+          const cachedDisc = await this.readCachedDisc(discId)
+          if (cachedDisc) {
+            this.setSnapshot({ state: 'catalog_ready', disc: cachedDisc })
+            this.options.logger?.info('catalog', `Reused saved catalog for ${discId}.`)
+            return this.snapshot
+          }
+        }
+      }
+
+      this.setSnapshot({ state: 'disc_detected', disc: null, progress: undefined })
+      this.setSnapshot({
+        state: 'catalog_loading',
+        disc: null,
+        progress: { scannedTitles: 0, totalTitles: null, currentTitleNumber: null },
+      })
+
       const scan = await this.options.worker.scanDisc({
         drive: this.options.drive,
         onProgress: (progress) => {
@@ -91,6 +109,7 @@ export class CatalogService {
         },
       })
       const disc = await this.normalizeScan(scan)
+      await this.writeCachedDisc(disc)
 
       this.setSnapshot({
         state: 'catalog_ready',
@@ -145,4 +164,56 @@ export class CatalogService {
       titles,
     }
   }
+
+  private async identifyCurrentDisc(): Promise<string | null> {
+    const identifyDisc = (this.options.worker as VlcWorker & { identifyDisc?: (drive?: string) => Promise<string> }).identifyDisc
+    if (!identifyDisc) return null
+
+    try {
+      return await identifyDisc.call(this.options.worker, this.options.drive)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (isDriveBusyMessage(message)) throw new Error(DRIVE_BUSY_MESSAGE, { cause: error })
+      this.options.logger?.warn('catalog', `Could not fingerprint ${this.options.drive} before refresh; running a full scan: ${message}`)
+      return null
+    }
+  }
+
+  private async readCachedDisc(discId: string): Promise<DiscSummary | null> {
+    const cachePath = join(this.options.cacheDir, 'discs', discId, 'catalog.json')
+    try {
+      const value: unknown = JSON.parse(await readFile(cachePath, 'utf8'))
+      if (!isCachedDiscSummary(value, discId)) return null
+      return { ...value, drive: this.options.drive }
+    } catch {
+      return null
+    }
+  }
+
+  private async writeCachedDisc(disc: DiscSummary): Promise<void> {
+    const cachePath = join(this.options.cacheDir, 'discs', disc.discId, 'catalog.json')
+    const temporaryPath = `${cachePath}.${process.pid}.${randomUUID()}.tmp`
+    try {
+      await writeFile(temporaryPath, JSON.stringify(disc), 'utf8')
+      await rename(temporaryPath, cachePath)
+    } catch (error) {
+      await unlink(temporaryPath).catch(() => undefined)
+      this.options.logger?.warn('catalog', `Could not save catalog for ${disc.discId}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+}
+
+function isCachedDiscSummary(value: unknown, discId: string): value is DiscSummary {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const candidate = value as Partial<DiscSummary>
+  return candidate.discId === discId
+    && typeof candidate.drive === 'string'
+    && Array.isArray(candidate.titles)
+    && candidate.titles.every((title) => title !== null && typeof title === 'object'
+      && typeof title.id === 'string'
+      && Number.isInteger(title.titleNumber)
+      && typeof title.durationSeconds === 'number'
+      && typeof title.thumbnailUrl === 'string'
+      && Array.isArray(title.audioTracks)
+      && Array.isArray(title.subtitleTracks))
 }

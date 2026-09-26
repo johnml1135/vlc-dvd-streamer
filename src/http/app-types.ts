@@ -6,6 +6,7 @@ import type { SessionManager } from '../session/session-manager.js'
 import type { VlcWorker } from '../vlc/worker.js'
 
 export type CatalogServiceLike = Pick<CatalogService, 'getSnapshot' | 'startRefresh' | 'refresh' | 'listTitles' | 'findTitle'>
+  & Partial<Pick<CatalogService, 'isDiscCurrent'>>
 export type EventHubLike = Pick<EventHub, 'publish' | 'subscribe'>
 export type SessionManagerLike = Pick<SessionManager, 'start' | 'seek' | 'getSession' | 'getActiveSession' | 'readStreamAsset' | 'touch' | 'stop' | 'stopAll' | 'reportPlayback'>
 export type VlcWorkerLike = Pick<VlcWorker, 'generateThumbnail'>

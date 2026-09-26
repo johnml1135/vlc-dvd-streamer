@@ -578,3 +578,39 @@ test('persisted pageshow restores playback position and log subscription', async
   await changeTitleSeek(page, Number(restoredEpoch) + 5)
   await expect(page.locator('#player-status')).toHaveText('Playing from the existing buffer.')
 })
+
+test('terminal session failure stops stale playback and offers return to titles', async ({ page }) => {
+  let browserSocket: WebSocketRoute | undefined
+  await page.routeWebSocket('/ws', (socket) => {
+    browserSocket = socket
+  })
+  await installSyntheticHls(page)
+  await openReadyCatalog(page)
+  await page.getByRole('button', { name: 'Start Stream' }).first().click()
+  await expect(page).toHaveURL(/\/player\//)
+  await expect(page.locator('#player-status')).toHaveText('Using hls.js fallback.')
+  await expect.poll(() => Boolean(browserSocket)).toBe(true)
+  await page.locator('#player').evaluate(async (node) => {
+    await (node as HTMLVideoElement).play()
+  })
+
+  browserSocket!.send(JSON.stringify({
+    type: 'session.updated',
+    payload: { id: 'another-session', state: 'failed', error: { message: 'unrelated failure' } },
+  }))
+  await expect(page.locator('#player-status')).toHaveText('Using hls.js fallback.')
+
+  browserSocket!.send(JSON.stringify({
+    type: 'session.updated',
+    payload: {
+      id: await page.locator('#player').getAttribute('data-session-id'),
+      state: 'failed',
+      error: { message: 'Playback stopped after repeated unreadable DVD sectors.', detail: 'The drive remained unreadable.' },
+    },
+  }))
+
+  await expect(page.locator('#player-status')).toHaveText('Playback failed: Playback stopped after repeated unreadable DVD sectors.')
+  await expect(page.getByRole('link', { name: 'Back to titles' })).toBeVisible()
+  await expect.poll(() => page.locator('#player').evaluate((node) => (node as HTMLVideoElement).src)).toBe('')
+  await expect.poll(() => page.locator('#player').evaluate((node) => (node as HTMLVideoElement).paused)).toBe(true)
+})

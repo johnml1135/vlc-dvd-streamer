@@ -19,6 +19,20 @@ interface ProcessRuntime {
   schedule(delayMs: number, task: () => void): () => void
 }
 
+export interface ManagedProcessObserver {
+  onSpawn(spec: CommandSpec, pid: number): void
+  onClose(spec: CommandSpec, pid: number): void
+}
+
+let managedProcessObserver: ManagedProcessObserver | null = null
+
+export function setManagedProcessObserver(observer: ManagedProcessObserver | null): () => void {
+  managedProcessObserver = observer
+  return () => {
+    if (managedProcessObserver === observer) managedProcessObserver = null
+  }
+}
+
 const STOP_GRACE_MS = 1000
 const FINAL_SETTLE_MS = 1000
 
@@ -156,12 +170,19 @@ export function spawnManagedProcess(spec: CommandSpec, runtime: ProcessRuntime =
   const events: ProcessEvents = {
     stdout: chunk => { stdout += chunk },
     stderr: chunk => { stderr += chunk },
-    error: settleOnStartError,
-    close: settleOnClose,
+    error: (error) => {
+      notifyManagedProcessClose(spec, child?.pid)
+      settleOnStartError(error)
+    },
+    close: (code, signal) => {
+      notifyManagedProcessClose(spec, child?.pid)
+      settleOnClose(code, signal)
+    },
   }
 
   try {
     child = runtime.start(spec, events)
+    if (child.pid !== undefined) notifyManagedProcessSpawn(spec, child.pid)
   } catch (error) {
     settleOnStartError(error)
   }
@@ -215,6 +236,15 @@ export function spawnManagedProcess(spec: CommandSpec, runtime: ProcessRuntime =
     getStderr: () => stderr,
     hasExited: () => settled,
   }
+}
+
+function notifyManagedProcessSpawn(spec: CommandSpec, pid: number): void {
+  try { managedProcessObserver?.onSpawn(spec, pid) } catch { }
+}
+
+function notifyManagedProcessClose(spec: CommandSpec, pid: number | undefined): void {
+  if (pid === undefined) return
+  try { managedProcessObserver?.onClose(spec, pid) } catch { }
 }
 
 export async function runManagedProcess(spec: CommandSpec): Promise<CompletedProcess> {

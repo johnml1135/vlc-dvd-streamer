@@ -1,18 +1,20 @@
-import { createHash } from 'node:crypto'
 import { createCommandSpec, type CommandSpec } from './command-spec.js'
 import type { RawDiscScan, RawDiscTitle } from '../disc/types.js'
+import { computeDiscIdentity } from '../disc/disc-identity.js'
+import { DRIVE_BUSY_MESSAGE, isDriveBusyMessage } from '../disc/drive-errors.js'
 import type { ServerLog } from '../logging/server-log.js'
 import { applyInferredTrackLabels, enrichTrackLabels, extractPlayableTitleNumbers, extractSelectedAudioTrackId, extractSelectedSubtitleTrackId, mergeTitleProbeMetadata, parseTitleProbeLog, type InferredTrackLabels, type RuntimeTrackMetadata } from './scan-parser.js'
 import { runManagedProcess, type CompletedProcess } from './process-supervisor.js'
 import { FALLBACK_AUDIO_LANGUAGE, PRIMARY_AUDIO_LANGUAGE, buildDiscProbeCommand, buildLanguageProbeCommand, buildTitleProbeCommand, buildTrackMetadataCommand } from './probe-commands.js'
-import { readDvdTitlesFromIfo, type IfoTitle } from '../disc/ifo-reader.js'
+import { readDvdTitlesFromIfoDetailed, type IfoReadResult } from '../disc/ifo-reader.js'
 
-export type IfoTitleReader = (videoTsDir: string) => Promise<IfoTitle[]>
+export type IfoTitleReader = (videoTsDir: string) => Promise<IfoReadResult>
 
 const LANGUAGE_LABEL_PROBES = [
   { code: 'spa', label: 'Spanish' },
   { code: 'fre', label: 'French' },
 ] as const
+const DEFAULT_SCAN_DEADLINE_MS = 5 * 60 * 1000
 
 interface ParsedTitleProbe {
   parsed: Pick<RawDiscTitle, 'durationSeconds' | 'audioTracks' | 'subtitleTracks'>
@@ -26,6 +28,7 @@ export interface DiscScanProgress {
 }
 
 export type ProcessRunner = (spec: CommandSpec) => Promise<CompletedProcess>
+export type DiscIdentityReader = (videoTsDir: string) => Promise<string>
 
 export interface VlcDiscScannerOptions {
   executable: string
@@ -37,17 +40,26 @@ export interface VlcDiscScannerOptions {
   logger?: Pick<ServerLog, 'info' | 'warn' | 'error'>
   runProcess?: ProcessRunner
   readIfoTitles?: IfoTitleReader
+  readDiscIdentity?: DiscIdentityReader
+  scanDeadlineMs?: number
+  now?: () => number
 }
 
 export class VlcDiscScanner {
   private readonly options: VlcDiscScannerOptions
   private readonly runProcess: ProcessRunner
   private readonly readIfoTitles: IfoTitleReader
+  private readonly readDiscIdentity: DiscIdentityReader
 
   constructor(options: VlcDiscScannerOptions) {
     this.options = options
     this.runProcess = options.runProcess ?? runManagedProcess
-    this.readIfoTitles = options.readIfoTitles ?? readDvdTitlesFromIfo
+    this.readIfoTitles = options.readIfoTitles ?? readDvdTitlesFromIfoDetailed
+    this.readDiscIdentity = options.readDiscIdentity ?? computeDiscIdentity
+  }
+
+  identifyDisc(drive = this.options.drive): Promise<string> {
+    return this.readDiscIdentity(getVideoTsDir(drive))
   }
 
   async scanDisc(input: { drive?: string; onProgress?: (progress: DiscScanProgress) => void } = {}): Promise<RawDiscScan> {
@@ -79,17 +91,23 @@ export class VlcDiscScanner {
   }
 
   private async scanDiscFromIfo(drive: string, onProgress?: (progress: DiscScanProgress) => void): Promise<RawDiscScan | null> {
-    const videoTsDir = `${drive.replace(/[/\\]+$/, '')}/VIDEO_TS`
+    const videoTsDir = getVideoTsDir(drive)
     try {
-      const ifoTitles = await this.readIfoTitles(videoTsDir)
-      const titles: RawDiscTitle[] = ifoTitles
-        .filter((title) => title.durationSeconds > 0)
-        .map((title) => ({
-          titleNumber: title.titleNumber,
-          durationSeconds: title.durationSeconds,
-          audioTracks: title.audioTracks,
-          subtitleTracks: title.subtitleTracks,
-        }))
+      const ifoResult = await this.readIfoTitles(videoTsDir)
+      if (ifoResult.skippedTitleNumbers.length > 0 || ifoResult.titles.length !== ifoResult.expectedTitleCount) {
+        this.options.logger?.warn(
+          'catalog',
+          `IFO title data is incomplete for ${videoTsDir}; skipped title(s) ${ifoResult.skippedTitleNumbers.join(', ') || 'unknown'}, falling back to VLC probes.`,
+        )
+        return null
+      }
+
+      const titles: RawDiscTitle[] = ifoResult.titles.map((title) => ({
+        titleNumber: title.titleNumber,
+        durationSeconds: title.durationSeconds,
+        audioTracks: title.audioTracks,
+        subtitleTracks: title.subtitleTracks,
+      }))
 
       if (titles.length === 0) {
         this.options.logger?.warn('catalog', `IFO read for ${videoTsDir} produced no titles; falling back to VLC probes.`)
@@ -97,8 +115,9 @@ export class VlcDiscScanner {
       }
 
       onProgress?.({ scannedTitles: titles.length, totalTitles: titles.length, currentTitleNumber: null })
-      return { discId: computeDiscId(drive, titles), drive, titles }
+      return { discId: await this.identifyDisc(drive), drive, titles }
     } catch (error) {
+      if (isDriveBusyMessage(formatError(error))) throw new Error(DRIVE_BUSY_MESSAGE, { cause: error })
       this.options.logger?.warn('catalog', `IFO read for ${videoTsDir} failed; falling back to VLC probes: ${formatError(error)}`)
       return null
     }
@@ -120,12 +139,14 @@ export class VlcDiscScanner {
   }
 
   private async scanDiscWithRealVlc(drive: string, onProgress?: (progress: DiscScanProgress) => void): Promise<RawDiscScan> {
+    const deadlineMs = this.options.scanDeadlineMs ?? DEFAULT_SCAN_DEADLINE_MS
+    const deadlineAt = this.now() + deadlineMs
     this.options.logger?.info('catalog', `Running VLC disc probe for ${drive}.`)
-    const discProbe = await this.runProcess(buildDiscProbeCommand({
+    const discProbe = await this.runProcessWithinDeadline(buildDiscProbeCommand({
       executable: this.options.executable,
       drive,
       timeoutMs: this.options.timeoutMs,
-    }))
+    }), deadlineAt, deadlineMs, 0, 0)
 
     const discLog = joinProcessOutput(discProbe)
     const titleNumbers = extractPlayableTitleNumbers(discLog)
@@ -145,7 +166,12 @@ export class VlcDiscScanner {
     for (const [index, titleNumber] of titleNumbers.entries()) {
       this.options.logger?.info('catalog', `Probing metadata for title ${titleNumber}.`)
       try {
-        const parsed = await this.probeTitleMetadata(drive, titleNumber)
+        const parsed = await this.probeTitleMetadata(drive, titleNumber, {
+          deadlineAt,
+          deadlineMs,
+          scannedTitles,
+          totalTitles: titleNumbers.length,
+        })
         titles.push({
           titleNumber,
           durationSeconds: parsed.durationSeconds,
@@ -157,6 +183,7 @@ export class VlcDiscScanner {
           `Found title ${titleNumber}: ${parsed.durationSeconds}s, ${parsed.audioTracks.length} audio track(s), ${parsed.subtitleTracks.length} subtitle track(s).`,
         )
       } catch (error) {
+        if (error instanceof DiscScanDeadlineError) throw error
         this.options.logger?.warn('catalog', `Skipping title ${titleNumber} because VLC did not produce stable duration metadata: ${formatError(error)}`)
       } finally {
         scannedTitles += 1
@@ -173,21 +200,22 @@ export class VlcDiscScanner {
     }
 
     return {
-      discId: computeDiscId(drive, titles),
+      discId: await this.identifyDisc(drive),
       drive,
       titles,
     }
   }
 
-  private async probeTitleMetadata(drive: string, titleNumber: number) {
-    const englishProbe = await this.runTitleProbe(drive, titleNumber, PRIMARY_AUDIO_LANGUAGE)
+  private async probeTitleMetadata(drive: string, titleNumber: number, budget: ScanBudget) {
+    const englishProbe = await this.runTitleProbe(drive, titleNumber, PRIMARY_AUDIO_LANGUAGE, budget)
     const parsedProbes = [englishProbe.parsed]
 
     if (englishProbe.parsed.audioTracks.length <= 1) {
       try {
-        const fallbackProbe = await this.runTitleProbe(drive, titleNumber, FALLBACK_AUDIO_LANGUAGE)
+        const fallbackProbe = await this.runTitleProbe(drive, titleNumber, FALLBACK_AUDIO_LANGUAGE, budget)
         parsedProbes.push(fallbackProbe.parsed)
-      } catch {
+      } catch (error) {
+        if (error instanceof DiscScanDeadlineError) throw error
         this.options.logger?.warn('catalog', `French fallback probe did not produce additional metadata for title ${titleNumber}.`)
       }
     }
@@ -195,11 +223,12 @@ export class VlcDiscScanner {
     let parsedMetadata = mergeTitleProbeMetadata(parsedProbes)
     if (this.options.trackMetadataScript && hasGenericTrackLabels(parsedMetadata)) {
       try {
-        const runtimeMetadata = await this.queryTrackMetadata(drive, titleNumber)
+        const runtimeMetadata = await this.queryTrackMetadata(drive, titleNumber, budget)
         if (runtimeMetadata) {
           parsedMetadata = enrichTrackLabels(parsedMetadata, runtimeMetadata)
         }
       } catch (error) {
+        if (error instanceof DiscScanDeadlineError) throw error
         this.options.logger?.warn(
           'catalog',
           `Runtime libVLC metadata enrichment failed for title ${titleNumber}: ${formatError(error)}`,
@@ -208,21 +237,21 @@ export class VlcDiscScanner {
     }
 
     if (hasGenericTrackLabels(parsedMetadata)) {
-      const inferredLabels = await this.inferTrackLabelsFromLanguageProbes(drive, titleNumber, englishProbe.log, parsedMetadata)
+      const inferredLabels = await this.inferTrackLabelsFromLanguageProbes(drive, titleNumber, englishProbe.log, parsedMetadata, budget)
       parsedMetadata = applyInferredTrackLabels(parsedMetadata, inferredLabels)
     }
 
     return parsedMetadata
   }
 
-  private async runTitleProbe(drive: string, titleNumber: number, audioLanguage: string) {
-    const titleProbe = await this.runProcess(buildTitleProbeCommand({
+  private async runTitleProbe(drive: string, titleNumber: number, audioLanguage: string, budget: ScanBudget) {
+    const titleProbe = await this.runProcessWithinDeadline(buildTitleProbeCommand({
       executable: this.options.executable,
       drive,
       titleNumber,
       audioLanguage,
       timeoutMs: this.options.timeoutMs,
-    }))
+    }), budget.deadlineAt, budget.deadlineMs, budget.scannedTitles, budget.totalTitles)
 
     return {
       parsed: parseTitleProbeLog(joinProcessOutput(titleProbe)),
@@ -230,17 +259,17 @@ export class VlcDiscScanner {
     } satisfies ParsedTitleProbe
   }
 
-  private async queryTrackMetadata(drive: string, titleNumber: number): Promise<RuntimeTrackMetadata | null> {
+  private async queryTrackMetadata(drive: string, titleNumber: number, budget: ScanBudget): Promise<RuntimeTrackMetadata | null> {
     if (!this.options.trackMetadataScript) {
       return null
     }
 
-    const result = await this.runProcess(buildTrackMetadataCommand({
+    const result = await this.runProcessWithinDeadline(buildTrackMetadataCommand({
       drive,
       titleNumber,
       timeoutMs: this.options.timeoutMs,
       trackMetadataScript: this.options.trackMetadataScript,
-    }))
+    }), budget.deadlineAt, budget.deadlineMs, budget.scannedTitles, budget.totalTitles)
     const payload = parseTrackMetadataPayload(result.stdout)
 
     if (hasUsableRuntimeTrackMetadata(payload)) {
@@ -259,6 +288,7 @@ export class VlcDiscScanner {
     titleNumber: number,
     englishProbeLog: string,
     parsedMetadata: Pick<RawDiscTitle, 'durationSeconds' | 'audioTracks' | 'subtitleTracks'>,
+    budget: ScanBudget,
   ): Promise<InferredTrackLabels> {
     const inferredAudioLabels = new Map<number, Set<string>>()
     const inferredSubtitleLabels = new Map<number, Set<string>>()
@@ -283,7 +313,7 @@ export class VlcDiscScanner {
       }
 
       try {
-        const log = await this.runLanguageSelectionProbe(drive, titleNumber, probe.code)
+        const log = await this.runLanguageSelectionProbe(drive, titleNumber, probe.code, budget)
         const audioTrackId = extractSelectedAudioTrackId(log)
         const subtitleTrackId = extractSelectedSubtitleTrackId(log)
 
@@ -294,7 +324,8 @@ export class VlcDiscScanner {
         if (subtitleTrackId !== null && subtitleTrackId !== englishSubtitleTrackId) {
           addInferredLabel(inferredSubtitleLabels, subtitleTrackId, probe.label)
         }
-      } catch {
+      } catch (error) {
+        if (error instanceof DiscScanDeadlineError) throw error
         this.options.logger?.warn('catalog', `${probe.label} language probe did not produce stable metadata for title ${titleNumber}.`)
       }
     }
@@ -305,14 +336,14 @@ export class VlcDiscScanner {
     }
   }
 
-  private async runLanguageSelectionProbe(drive: string, titleNumber: number, languageCode: string) {
-    const probe = await this.runProcess(buildLanguageProbeCommand({
+  private async runLanguageSelectionProbe(drive: string, titleNumber: number, languageCode: string, budget: ScanBudget) {
+    const probe = await this.runProcessWithinDeadline(buildLanguageProbeCommand({
       executable: this.options.executable,
       drive,
       titleNumber,
       languageCode,
       timeoutMs: this.options.timeoutMs,
-    }))
+    }), budget.deadlineAt, budget.deadlineMs, budget.scannedTitles, budget.totalTitles)
 
     return joinProcessOutput(probe)
   }
@@ -331,6 +362,52 @@ export class VlcDiscScanner {
         ? { ...process.env, ...this.options.shimEnv }
         : undefined,
     })
+  }
+
+  private async runProcessWithinDeadline(
+    spec: CommandSpec,
+    deadlineAt: number,
+    deadlineMs: number,
+    scannedTitles: number,
+    totalTitles: number,
+  ): Promise<CompletedProcess> {
+    const remainingMs = deadlineAt - this.now()
+    if (remainingMs <= 0) throw this.createDeadlineError(deadlineMs, scannedTitles, totalTitles)
+
+    const timeoutMs = Math.max(1, Math.min(spec.timeoutMs > 0 ? spec.timeoutMs : remainingMs, remainingMs))
+    const result = await this.runProcess({ ...spec, timeoutMs })
+    if (this.now() >= deadlineAt || (result.timedOut && timeoutMs < spec.timeoutMs)) {
+      throw this.createDeadlineError(deadlineMs, scannedTitles, totalTitles)
+    }
+
+    const output = [result.stdout, result.stderr].filter(Boolean).join('\n')
+    if (isDriveBusyMessage(output)) throw new Error(DRIVE_BUSY_MESSAGE)
+    return result
+  }
+
+  private createDeadlineError(deadlineMs: number, scannedTitles: number, totalTitles: number): DiscScanDeadlineError {
+    const label = deadlineMs >= 60000
+      ? `${deadlineMs / 60000}-minute`
+      : deadlineMs >= 1000 ? `${deadlineMs / 1000}-second` : `${deadlineMs} ms`
+    return new DiscScanDeadlineError(`DVD scan exceeded its overall ${label} deadline after probing ${scannedTitles} of ${totalTitles} titles.`)
+  }
+
+  private now(): number {
+    return this.options.now?.() ?? Date.now()
+  }
+}
+
+interface ScanBudget {
+  deadlineAt: number
+  deadlineMs: number
+  scannedTitles: number
+  totalTitles: number
+}
+
+class DiscScanDeadlineError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'DiscScanDeadlineError'
   }
 }
 
@@ -447,13 +524,8 @@ function parseTrackOptions(values: unknown[]): Array<{ id: number; label: string
   return tracks
 }
 
-function computeDiscId(drive: string, titles: RawDiscTitle[]): string {
-  const fingerprint = createHash('sha1')
-    .update(`${drive}|${titles.map((title) => `${title.titleNumber}:${title.durationSeconds}`).join('|')}`)
-    .digest('hex')
-    .slice(0, 12)
-
-  return `disc-${fingerprint}`
+function getVideoTsDir(drive: string): string {
+  return `${drive.replace(/[/\\]+$/, '')}/VIDEO_TS`
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
