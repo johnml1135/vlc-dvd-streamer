@@ -4,6 +4,30 @@ Turn the Windows PC with the DVD drive into a little living-room streaming box. 
 
 No ripping workflow. No library management. No mystery VLC window on the client. Just the disc that is in the drive right now, streamed across your local network.
 
+## Quick Start ⚡
+
+Paste into PowerShell from the repo folder on the PC with the DVD drive.
+
+First run (installs, builds, starts on the LAN, and opens the browser):
+
+```powershell
+$env:HOST='0.0.0.0'; $env:PORT='3000'; $env:VLC_PATH='C:\Program Files\VideoLAN\VLC\vlc.exe'; npm install; npm run build; npm start; Start-Process "http://$((Get-NetIPAddress -AddressFamily IPv4 | ? { $_.PrefixOrigin -eq 'Dhcp' } | Select -First 1).IPAddress):3000"
+```
+
+Later runs (already built):
+
+```powershell
+$env:HOST='0.0.0.0'; npm start
+```
+
+Stop the server:
+
+```powershell
+npm stop
+```
+
+The drive is auto-detected. If other devices can't connect, allow Node.js through Windows Firewall, or use the installer below.
+
 ## What It Does ✨
 
 - Auto-detects the optical drive (the one with a disc loaded) so you usually don't need to configure a drive letter.
