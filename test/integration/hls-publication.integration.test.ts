@@ -29,6 +29,24 @@ describe('HLS publication', () => {
     expect(output.currentRange.endSeconds).toBe(2)
   })
 
+  it('drops the near-empty seek stub VLC emits first and renumbers the real segments', async () => {
+    const output = await setup()
+    output.seekTo(20)
+    const epoch = await output.beginEpoch()
+    // VLC started at slot 11: stub as 11, real content for slots 11 and 12 as 12 and 13.
+    await writeFile(join(epoch.outputDir, 'index.m3u8'), `#EXTM3U\n#EXTINF:0.01,\n${name(11)}\n`)
+    await writeFile(join(epoch.outputDir, name(11)), media(1))
+    expect(await output.observe(epoch)).toBeNull()
+    await writeFile(join(epoch.outputDir, 'index.m3u8'), `#EXTM3U\n#EXTINF:0.01,\n${name(11)}\n#EXTINF:2,\n${name(12)}\n#EXTINF:2,\n${name(13)}\n`)
+    await writeFile(join(epoch.outputDir, name(12)), media(2))
+    await writeFile(join(epoch.outputDir, name(13)), media(3))
+    const progress = await output.observe(epoch)
+    expect(progress?.lastSegmentNumber).toBe(12)
+    expect(output.currentRange).toMatchObject({ startSeconds: 20, endSeconds: 24 })
+    const asset = await output.readAsset(name(11), { generation: String(epoch.id) })
+    expect(asset?.slotNumber).toBe(11)
+  })
+
   it('requires a valid duration before every segment URI', async () => {
     const output = await setup()
     const epoch = await output.beginEpoch()

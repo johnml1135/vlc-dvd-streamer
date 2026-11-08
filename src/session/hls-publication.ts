@@ -114,7 +114,17 @@ export class HlsPublication {
       if (isMissingFileError(error)) return null
       throw error
     }
-    const segments = parsePlaylist(manifest)
+    let segments = parsePlaylist(manifest)
+    // A VLC run started with --start-time first emits a near-empty, audio-only
+    // stub segment (pre-seek residue) under the initial segment number. Serving
+    // it makes MSE players initialise without a video track (bufferAppendError)
+    // and shifts every real segment one slot late. Drop it and renumber the
+    // rest. VLC lists every segment (numsegs=0), so the stub is always first.
+    const first = segments[0]
+    if (first && first.duration < SEEK_STUB_MAX_SECONDS) {
+      if (segments.length === 1) return null
+      segments = segments.slice(1).map(segment => ({ ...segment, slot: segment.slot - 1 }))
+    }
     const names: string[] = []
     let previousSlot: number | undefined
     for (const segment of segments) {
@@ -244,6 +254,8 @@ export class HlsPublication {
     return result
   }
 }
+
+const SEEK_STUB_MAX_SECONDS = 0.5
 
 function segmentName(slot: number): string { return `segment-${String(slot).padStart(6, '0')}.ts` }
 function segmentSlot(name: string): number | null {
