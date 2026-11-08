@@ -69,7 +69,7 @@ export function buildHlsArgs(input: HlsArgsInput): string[] {
     '--no-qt-error-dialogs',
     '--no-video-title-show',
     '--no-dvdnav-menu',
-    '--deinterlace',
+    '--deinterlace=1',
     '--no-sout-all',
     '--sout-x264-preset=veryfast',
     // Fixed GOP, no scene-cut keyframes: guarantees a keyframe every SEG seconds
